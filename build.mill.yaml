@@ -1,0 +1,10 @@
+extends: JavaModule
+
+jvmVersion: 21
+
+repositories:
+- https://artifacts.openmicroscopy.org/artifactory/maven/
+
+mvnDeps:
+- ome:formats-gpl:8.4.0
+- io.modelcontextprotocol.sdk:mcp:1.1.0
