@@ -51,6 +51,8 @@ it into an open format?"
 - `path` (string, required) — absolute path to the image file.
 - `series` (integer, optional, default 0) — which image series to inspect, for
   multi-series formats.
+- `detail` (enum: `summary` | `standard` | `full`, optional, default `standard`)
+  — how much metadata to return (see below).
 
 **Output (JSON):**
 - Format name and version
@@ -63,12 +65,32 @@ it into an open format?"
   - Instrument metadata (objective, magnification, NA, immersion)
   - Acquisition timestamps (per-plane if available, or global)
   - Any additional key-value metadata the format exposes
+- `omitted_metadata_bytes` — when `detail` is not `full`, the approximate size
+  in bytes of metadata that was available but not returned.
+
+**Detail levels:**
+
+- **`summary`:** Dimensions, pixel type, physical pixel sizes, channel count and
+  names.  Enough for the LLM to understand what the file contains and ask
+  follow-up questions.  Fast and small even for files with enormous metadata
+  (e.g., per-plane galvo voltages in a line-scan confocal).
+- **`standard`** (default): Everything in `summary` plus channel
+  excitation/emission, instrument metadata, and global acquisition timestamps.
+  This is the right default — detailed enough for most questions, compact enough
+  to stay well within LLM context limits.
+- **`full`:** All metadata the format exposes, including per-plane timestamps,
+  per-plane stage positions, scanner voltages, and any other key-value pairs.
+  This can be very large and should only be requested when the user specifically
+  needs it.
 
 **Notes:**
 - Should enumerate all series with basic info (name, dimensions) even when a
   specific series is selected, so the user knows what else is in the file.
 - Metadata that Bio-Formats exposes via OME-XML should be parsed into structured
   fields, not returned as raw XML.
+- When `detail` is not `full`, the response must include
+  `omitted_metadata_bytes` so the LLM can tell the user that more metadata
+  exists and offer to retrieve it.
 
 ### 2.2 `get_thumbnail`
 
@@ -176,6 +198,34 @@ default to lzw (or zlib).  For now, it often becomes a sequential read
 bottleneck for many downstream applications.
 
 
+### 2.6 Resource Constraints
+
+Microscopy files can be tens or hundreds of gigabytes.  Operations that touch
+pixel data — thumbnails, stats, plane extraction, conversion — can easily exceed
+reasonable time or memory limits if applied naively to an entire large dataset.
+
+**Common budget parameter:** Every tool that reads pixel data accepts an
+optional `budget` parameter:
+
+- `budget` (object, optional) — resource limits for this call.
+  - `max_bytes` (integer, optional) — approximate upper bound on the number of
+    raw pixel bytes the tool will read.  The tool may subsample, crop, or
+    truncate to stay within this limit.  If the limit forces the tool to skip
+    data, the response must say what was skipped.
+  - `timeout_seconds` (integer, optional) — wall-clock time limit.  If the
+    operation cannot complete in this time, it should return a partial result
+    (if meaningful) or an error explaining what happened.
+
+Tools should have sensible built-in defaults so that callers who omit `budget`
+get safe behavior.  The defaults should be conservative enough that a naive
+`get_intensity_stats` call on a 200 GB file does not hang or OOM — it should
+subsample and report that it did so.
+
+The `inspect_image` tool does not need a `budget` parameter because its metadata
+detail levels (§2.1) already control response size, and metadata extraction is
+fast even for large files.
+
+
 ## 3. Technology Choices
 
 ### 3.1 Runtime Platform: JVM
@@ -202,11 +252,11 @@ gives us the broadest, most reliable format coverage available.
 
 The tradeoff is that future *computational* tools (segmentation, ML inference)
 will want the Python scientific stack.  This is explicitly out of scope for the
-POC and addressed in the extensibility plan (§5).
+POC and addressed in the extensibility plan (§6).
 
 ### 3.2 Implementation Language: Java (25+)
 
-**Decision:** Modern Java, targeting Java 25, the latest LTS version.
+**Decision:** Modern Java, targeting Java 21 LTS.
 
 **Rationale — candidates considered:**
 
@@ -364,9 +414,83 @@ After `mill publish-local` (or equivalent), either:
 The README should document both workflows clearly.
 
 
-## 5. Extensibility Plan
+## 5. File Access and Trusted Roots
 
-### 5.1 Adding More JVM-Native Tools
+The server reads files from the local filesystem and must not be an open door to
+arbitrary file access.  Defense in depth applies, but even cooperative safety
+(where components respect declared boundaries rather than enforcing them via OS
+mechanisms) is far better than nothing.
+
+### 5.1 MCP Client Roots
+
+The MCP protocol allows clients to declare *roots* — filesystem paths that the
+client considers in scope for the session.  The server should respect these:
+
+- On startup, the server reads the client's declared roots.
+- Any tool invocation that references a file path must resolve to a location
+  under one of the declared roots.  Requests for paths outside all roots are
+  rejected with a clear error message.
+- Symlinks and `..` components are resolved before checking, so they cannot be
+  used to escape the roots.
+
+This is cooperative safety — the client declares what it considers permitted, and
+the server honors that declaration.  It does not protect against a malicious
+client, but it prevents accidental access to unrelated parts of the filesystem
+and gives the user a clear contract about what the server can touch.
+
+### 5.2 User-Declared Path Rules
+
+Independent of client roots, the user may want to grant or restrict access to
+specific paths — for example, whitelisting a data directory that the client
+doesn't know about, or blacklisting a sensitive directory that happens to fall
+under a client root.
+
+The server supports two lists:
+
+- **Allow-list (whitelist):** Additional paths the server may access, even if
+  they are not under any client root.  Useful for pointing the server at a data
+  store the client is unaware of.
+- **Deny-list (blacklist):** Paths the server must refuse to access, even if
+  they fall under a client root or an allow-list entry.  The deny-list takes
+  precedence over all other access grants.
+
+**Resolution order:** A path is accessible if and only if:
+1. It is not under any deny-list entry, AND
+2. It is under a client root OR under an allow-list entry.
+
+### 5.3 Configuration via the Runner
+
+The JBang runner file (`runner/bioimage-mcp.java`) is a natural place for users
+to declare their path rules.  Because the runner is a small, user-editable file
+that is already per-machine, adding allow/deny lists there keeps configuration
+local and visible without requiring a separate config file.  For example:
+
+```java
+///usr/bin/env jbang "$0" "$@" ; exit $?
+//DEPS org.bioimage:mcp-server:0.1.0
+
+import org.bioimage.mcp.BioImageMcpServer;
+
+public class bioimage_mcp {
+    public static void main(String[] args) {
+        BioImageMcpServer.builder()
+            .allow("/data/microscopy")
+            .allow("/shared/lab-images")
+            .deny("/data/microscopy/private")
+            .build()
+            .run(args);
+    }
+}
+```
+
+Command-line arguments or environment variables are alternative mechanisms, but
+the runner file has the advantage of being self-documenting and
+version-controllable per machine.
+
+
+## 6. Extensibility Plan
+
+### 6.1 Adding More JVM-Native Tools
 
 Additional tools that only need Bio-Formats and standard Java libraries can be
 added directly — e.g., ROI extraction, multi-series comparison, time-series
@@ -376,7 +500,7 @@ same pattern.
 Note that ImageJ contains many diverse capabilities and plugins, many of
 which are accessible programmatically and downloadable from repositories.
 
-### 5.2 Python Integration for Computational Tools
+### 6.2 Python Integration for Computational Tools
 
 When the project grows to need Python-based computation (segmentation via
 cellpose/stardist, deconvolution, ML inference), the architecture should be:
@@ -411,13 +535,13 @@ sealed interface ToolBackend {
 }
 ```
 
-### 5.3 Additional Transports
+### 6.3 Additional Transports
 
 The stdio transport can be supplemented with HTTP/SSE for shared-server
 deployments (e.g., a lab server that multiple researchers connect to).  The tool
 logic is transport-independent; only the protocol handling layer changes.
 
-### 5.4 OMERO Integration
+### 6.4 OMERO Integration
 
 A natural future direction is connecting to OMERO servers — browsing projects,
 datasets, and images; pulling data for local analysis; pushing results back.
@@ -425,65 +549,64 @@ This would be a separate set of tools using the OMERO Java client libraries,
 which are well-maintained and Maven-published.
 
 
-## 6. Key Dependencies
+## 7. Key Dependencies
 
 | Dependency              | Purpose                                   | Coordinates (approximate)                    |
 |-------------------------|-------------------------------------------|----------------------------------------------|
 | Bio-Formats (GPL)       | Microscopy format I/O                     | `ome:formats-gpl:7.x`                       |
 | OME Common              | OME-XML metadata model                    | `ome:ome-common:6.x`                        |
-| MCP Java SDK (if one exists) | MCP protocol handling               | TBD — may need to implement protocol directly|
-| JSON library            | Serialization (Jackson, Gson, or similar) | TBD                                          |
+| MCP Java SDK            | MCP protocol handling                     | `io.modelcontextprotocol.sdk:mcp:1.x`       |
 | JBang                   | Runner / launcher                         | (build-time / user tooling, not a dep)       |
 
-**Note on MCP SDK availability:** At time of writing, the MCP ecosystem is
-young and a mature Java MCP SDK may or may not exist.  If not, the stdio MCP
-protocol is simple enough (JSON-RPC 2.0 over stdin/stdout) to implement
-directly.  This should be evaluated at implementation time.
+**MCP Java SDK:** The official Java MCP SDK
+(https://github.com/modelcontextprotocol/java-sdk) is maintained under the
+MCP GitHub organization in collaboration with the Spring team.  It provides
+sync and async server APIs, built-in stdio and HTTP transports, and Jackson-
+based serialization.  Documentation is at
+https://modelcontextprotocol.github.io/java-sdk/.  The `mcp` artifact bundles
+the core SDK with Jackson and is the primary dependency for this project.  We
+do not use the Spring Boot starters — this is a plain Java application.
 
 **Note on Bio-Formats licensing:** Bio-Formats is available under GPL-2.0.  The
 `formats-gpl` artifact includes all readers.  The `formats-bsd` artifact covers
-a smaller set of formats under BSD-2-Clause.  The GPL version is appropriate for
-a standalone tool; if the library is to be embedded in proprietary software, the
-BSD subset or a licensing arrangement with OME would be needed.  Initially
-the project will be licensed as GPL, but it should be split into
-GPL-requiring and GPL-independent parts if there is a major component that
-does not depend substantially on Bio-Formats.
+a smaller set of formats under BSD-2-Clause.  This project is licensed under
+GPL-3.0, which is compatible with Bio-Formats' GPL-2.0.
+
+**Architectural isolation:** Although the entire project is GPL for now, all
+Bio-Formats API usage must be confined to the `formats/` package.  The rest of
+the codebase — tool implementations, MCP protocol handling, model records —
+depends only on interfaces and records defined outside `formats/`, never on
+Bio-Formats types directly.  This keeps the Bio-Formats dependency behind a
+clean abstraction boundary so that if a licensing separation is ever needed
+(e.g., offering a BSD-licensed core with a GPL plugin for proprietary format
+readers), the work is a matter of swapping implementations rather than
+untangling interleaved code.
 
 
-## 7. Open Questions
+## 8. Open Questions
 
 These should be resolved during implementation:
 
-1. **MCP Java SDK status.** Is there a usable Java/Kotlin MCP SDK, or do we
-   implement the protocol directly?  The protocol is straightforward JSON-RPC
-   2.0, so direct implementation is feasible but an SDK would save boilerplate.
-
-2. **Image return format.** MCP supports returning images as base64-encoded
+1. **Image return format.** MCP supports returning images as base64-encoded
    content.  Need to confirm the exact content type handling across MCP clients
    (Claude Desktop, Claude Code) and ensure PNG thumbnails display correctly.
 
-3. **File access model.** The POC assumes the server has filesystem access to
+2. **File access model.** The POC assumes the server has filesystem access to
    the image files (appropriate for a local stdio server).  For future
    HTTP-transport deployments, a file-upload or path-mapping mechanism would be
    needed.
 
-4. **Large file handling.** Some microscopy files are tens or hundreds of
-   gigabytes.  Bio-Formats handles this via lazy plane-by-plane reading, but
-   operations like `get_intensity_stats` across all planes of a 100 GB file
-   could be very slow.  The tool contracts should specify behavior for large
-   files (subsampling, warnings, limits).
-
-5. **Concurrency model.** Bio-Formats readers are not thread-safe.  For the
+3. **Concurrency model.** Bio-Formats readers are not thread-safe.  For the
    stdio POC (single client, sequential requests) this is not an issue.  For
    future HTTP/multi-client scenarios, reader pooling or per-request reader
    instantiation will be needed.  Readers are usually relatively inexpensive
    save possibly for buffers.  Leveraging Java 21+ virtual threads by
    default should enable a safe performant solution.
 
-6. **Maven coordinates and group ID.** The actual group ID for Maven Central
+4. **Maven coordinates and group ID.** The actual group ID for Maven Central
    publication needs to be decided (e.g., `org.bioimage`, `io.github.<user>`,
    etc.).
 
-7. **Mill vs Gradle final decision.** Evaluate Mill 1.1's Java support
+5. **Mill vs Gradle final decision.** Evaluate Mill 1.1's Java support
    concretely with the actual dependency set (Bio-Formats has complex transitive
    dependencies).  Fall back to Gradle if issues arise.
