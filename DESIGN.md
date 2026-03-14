@@ -32,6 +32,12 @@ and format conversion alone solve real pain points for working microscopists.
 in under a minute, with no repository clone, no build step, and no dependency
 management.
 
+**Never delete a user's primary image data.**  The server is a *read and export*
+tool.  No operation — conversion, export, cleanup, or any future capability —
+should ever delete, overwrite, or modify a user's original image files.  Source
+data is sacred.  If a workflow produces derived files, those are new files; the
+originals remain untouched.
+
 **Extensible by design.**  The architecture anticipates future computational
 tools (Python-based ML models, batch processing, OMERO integration) without
 over-engineering for them now.
@@ -167,7 +173,7 @@ tools with inline display capability.
 - Auto-contrast should use a percentile-based stretch (e.g., 0.1th to 99.9th
   percentile) rather than min/max, to handle hot pixels gracefully.
 
-### 2.5 `convert_to_tiff`
+### 2.5 `export_to_tiff`
 
 **Purpose:** Export data to OME-TIFF for downstream use with standard tools.
 
@@ -192,6 +198,11 @@ tools with inline display capability.
   readable by virtually all scientific imaging software.
 - Bio-Formats' writer infrastructure handles this natively.
 - Should preserve as much OME metadata as possible from the source file.
+- The tool must detect cases where the source file contains metadata that
+  cannot be faithfully represented in the OME-TIFF output.  When this happens,
+  the response should include a clear message listing what metadata was
+  preserved and what was lost or degraded, so the user can make an informed
+  decision about whether the export meets their needs.
 - If zlib is not trivially deployable, remove it as an option for now.
 - If parallel read/write of compressed TIFF becomes commonplace, switch
 default to lzw (or zlib).  For now, it often becomes a sequential read
@@ -364,7 +375,7 @@ bioimage-mcp/
 │       │   ├── GetThumbnail.java
 │       │   ├── GetIntensityStats.java
 │       │   ├── GetPlane.java
-│       │   └── ConvertToTiff.java
+│       │   └── ExportToTiff.java
 │       ├── formats/
 │       │   └── BioFormatsReader.java  # Bio-Formats abstraction layer
 │       ├── model/
@@ -510,7 +521,7 @@ server.  That server delegates to Python when needed.
 
 **Subprocess invocation is the pragmatic first approach.**  The JVM server calls
 a Python script via `ProcessBuilder`, passing data via file paths (e.g., a
-temporary OME-TIFF exported by `convert_to_tiff`) and receiving results as
+temporary OME-TIFF exported by `export_to_tiff`) and receiving results as
 JSON on stdout.  This is simple, debuggable, and avoids complex IPC setup.
 
 **Amdahl's law justification:** In an LLM-driven workflow, the round-trip
