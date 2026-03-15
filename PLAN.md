@@ -27,6 +27,20 @@ look up API details, pixel type constants, metadata accessors, etc.
   (`y*sizeX + x + c*7 + z*13 + t*31` mod type range) lets tests compute
   expected values independently.  Detail-level filtering, configurable byte
   order, coordinate validation.  22 tests.
+- **Tool infrastructure** — `ToolResult<T>` sealed interface (Success/Failure
+  with ErrorKind enum: ACCESS_DENIED, INVALID_ARGUMENT, IO_ERROR, TIMEOUT).
+  `PathValidator` functional interface wrapping access checks.  Tools return
+  structured results, never throw — errors are first-class outcomes.
+- **Phase 2a: `inspect_image`** — `InspectImageTool` returns
+  `ToolResult<ImageMetadata>`.  Takes path + PathValidator + reader factory +
+  budget (timeout, maxResponseBytes).  Validates path, opens reader inside
+  CancellableTask, gets metadata, caps response size (truncates extraMetadata
+  first, then downgrades detail level).  15 tests.
+- **Phase 2b: `get_plane`** — `GetPlaneTool` returns `ToolResult<byte[]>`
+  (PNG).  `PixelConverter` utility handles byte→double extraction for all 9
+  pixel types with correct signedness/byte order, plus uint8 mapping
+  (auto-contrast via percentile stretch or full-range normalization).
+  Area-average downsampling.  15 tool tests + 20 converter tests.
 
 
 ## Phase 2: Tools against the fake reader
@@ -34,21 +48,6 @@ look up API details, pixel type constants, metadata accessors, etc.
 Build each tool as a pure function: (reader, request) → response.  No
 MCP protocol awareness — just Java methods that take structured input and
 return structured output.  All tested against the fake reader.
-
-### 2a. `inspect_image`
-
-Metadata only, no pixel data.  Exercises the reader abstraction for
-metadata extraction.  Test all three detail levels (summary, standard,
-full) and the `omitted_metadata_bytes` calculation.  This is the simplest
-tool, so it's the right place to establish the tool implementation
-pattern that the others will follow.
-
-### 2b. `get_plane`
-
-Single-channel, single-plane extraction.  First tool that touches pixel
-data.  Tests the pixel-reading path, auto-contrast (percentile stretch),
-normalization toggle, and PNG encoding.  Keep it simple — one channel,
-one plane, grayscale output.
 
 ### 2c. `get_intensity_stats`
 
@@ -77,20 +76,11 @@ on having the reading side solid.
 
 ## Phase 3: Budget and resource constraints
 
-By this point all tools work against the fake reader with unlimited
-resources.  Now add the `budget` parameter (max_bytes, timeout_seconds)
-and integrate with `CancellableTask`.
-
-- Wire `timeout_seconds` → `CancellableTask` timeout
-- Implement byte-counting in the reader to enforce `max_bytes`
-  (subsampling, early termination with partial-result reporting)
-- Ensure every tool reports clearly when budget limits forced it to
-  skip data
-
-This is separate from Phase 2 because budget logic is cross-cutting
-and easier to test once the tools themselves are known-good.  But the
-tool interfaces should accept budget parameters from the start (with
-"unlimited" defaults) so there's no retrofit.
+Tools already accept timeout and byte-budget parameters with sensible
+defaults, and run inside `CancellableTask`.  This phase is for any
+remaining budget work that emerges from building the later tools —
+e.g. subsampling strategies for `get_intensity_stats` on huge files,
+or partial-result reporting when budgets force data to be skipped.
 
 
 ## Phase 4: Bio-Formats reader implementation
