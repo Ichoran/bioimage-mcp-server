@@ -90,14 +90,31 @@ look up API details, pixel type constants, metadata accessors, etc.
   26 tool tests.
 
 
-## Phase 3: Budget and resource constraints
+## Phase 3: Budget and resource constraints — done
 
-Tools already accept timeout and byte-budget parameters with sensible
-defaults, and run inside `CancellableTask`.  `get_intensity_stats` has
-adaptive reading with rate estimation (done).  This phase is for any
-remaining budget work that emerges from building the later tools —
-e.g. adaptive reading for `get_thumbnail`, or partial-result reporting
-when budgets force data to be skipped.
+- **`get_thumbnail` adaptive projection** — New `Projection.ADAPTIVE`
+  (now the default).  Reads the central Z-slice for all channels first
+  (calibration + fallback), then incrementally accumulates a max-intensity
+  projection, checking `ReadRateEstimator` time budget and byte budget
+  before each Z-slice batch.  If a budget limit is approached, falls back
+  to the clean mid-slice backup — no partial max, no failure.  Returns
+  `ThumbnailResult` record with `projectionUsed` (always a concrete
+  mode, never ADAPTIVE).  Explicit projection modes (MID_SLICE,
+  MAX_INTENSITY, SUM) retain hard-fail behavior on budget exceeded.
+  36 thumbnail tests + 14 MaxProjection tests.
+- **`MaxProjection` sealed interface** — Type-specialized max-intensity
+  accumulator.  `IntMaxProjection` (BIT/UINT8/INT8/UINT16/INT16) uses
+  `int[]` working arrays with per-type decode loops and counting-sort
+  histogram for O(n) percentile calculation — no double[] intermediates,
+  no O(n log n) sort.  `DoubleMaxProjection` (INT32/UINT32/FLOAT/DOUBLE)
+  uses `double[]` with sort-based percentiles.  `fork()` for snapshotting
+  mid-slice state.  Histogram percentile uses the same linear-interpolation
+  formula as `PixelConverter.percentile`, so int and double paths produce
+  identical output for integer data (verified by tests).
+- Other tools: `inspect_image` already degrades detail level gracefully;
+  `get_intensity_stats` has adaptive reading with rate estimation;
+  `get_plane` and `export_to_tiff` use appropriate hard-fail behavior
+  (single-plane and all-or-nothing respectively).
 
 
 ## Phase 4: Bio-Formats reader implementation

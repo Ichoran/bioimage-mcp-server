@@ -2,6 +2,7 @@ package lab.kerrr.mcpbio.bioimageserver;
 
 import lab.kerrr.mcpbio.bioimageserver.FakeImageReader.FakeSeries;
 import lab.kerrr.mcpbio.bioimageserver.GetThumbnailTool.Projection;
+import lab.kerrr.mcpbio.bioimageserver.GetThumbnailTool.ThumbnailResult;
 import lab.kerrr.mcpbio.bioimageserver.PathAccessControl.AccessResult;
 import lab.kerrr.mcpbio.bioimageserver.ToolResult.ErrorKind;
 
@@ -29,7 +30,7 @@ class GetThumbnailToolTest {
     @Test
     void producesValidPng() {
         var result = runSimple("/img.tif");
-        assertSuccess(result, png -> {
+        assertSuccessPng(result, png -> {
             assertEquals((byte) 0x89, png[0]);
             assertEquals((byte) 'P', png[1]);
             assertEquals((byte) 'N', png[2]);
@@ -40,7 +41,7 @@ class GetThumbnailToolTest {
     @Test
     void pngIsRgb() {
         var result = runSimple("/img.tif");
-        assertSuccess(result, png -> {
+        assertSuccessPng(result, png -> {
             var image = decodePng(png);
             // PNG decoder may choose different internal representations
             // (TYPE_INT_RGB=1, TYPE_3BYTE_BGR=5, etc.) but it should
@@ -62,7 +63,7 @@ class GetThumbnailToolTest {
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
 
-        assertSuccess(result, png -> {
+        assertSuccessPng(result, png -> {
             var image = decodePng(png);
             // Pick a non-zero pixel and check it's greenish (R=0, G>0, B=0)
             boolean foundGreen = false;
@@ -98,7 +99,7 @@ class GetThumbnailToolTest {
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
-        assertSuccess(result, png -> assertNotNull(decodePng(png)));
+        assertSuccessPng(result, png -> assertNotNull(decodePng(png)));
     }
 
     @Test
@@ -120,8 +121,8 @@ class GetThumbnailToolTest {
         var maxResult = GetThumbnailTool.execute(
                 maxReq, PathValidator.allowAll(), factory);
 
-        assertSuccess(midResult, midPng -> {
-            assertSuccess(maxResult, maxPng -> {
+        assertSuccessPng(midResult, midPng -> {
+            assertSuccessPng(maxResult, maxPng -> {
                 var midImg = decodePng(midPng);
                 var maxImg = decodePng(maxPng);
                 // Sum all green channel values (single channel → green)
@@ -155,12 +156,107 @@ class GetThumbnailToolTest {
         var maxResult = GetThumbnailTool.execute(
                 maxReq, PathValidator.allowAll(), factory);
 
-        assertSuccess(sumResult, sumPng -> {
-            assertSuccess(maxResult, maxPng -> {
+        assertSuccessPng(sumResult, sumPng -> {
+            assertSuccessPng(maxResult, maxPng -> {
                 assertFalse(java.util.Arrays.equals(sumPng, maxPng),
                         "sum and max projections should differ");
             });
         });
+    }
+
+    // ================================================================
+    // Adaptive projection
+    // ================================================================
+
+    @Test
+    void adaptiveUpgradesToMaxWhenBudgetAllows() {
+        // Small image, generous budget → should upgrade to MAX_INTENSITY
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(16, 16, 5, 2, 1, PixelType.UINT8))
+                .build();
+        var request = new GetThumbnailTool.Request(
+                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                Duration.ofSeconds(5), 256L * 1024 * 1024);
+        var result = GetThumbnailTool.execute(
+                request, PathValidator.allowAll(), factory);
+
+        assertSuccess(result, tr -> {
+            assertEquals(Projection.MAX_INTENSITY, tr.projectionUsed(),
+                    "adaptive should upgrade to max with generous budget");
+            assertNotNull(decodePng(tr.png()));
+        });
+    }
+
+    @Test
+    void adaptiveFallsToMidSliceWhenByteBudgetTight() {
+        // 3 channels × 10 Z-slices × 32×32 = 30720 bytes for max,
+        // but budget is only 3200 (enough for mid-slice: 3 × 1 × 1024)
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(32, 32, 10, 3, 1, PixelType.UINT8))
+                .build();
+        var request = new GetThumbnailTool.Request(
+                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                Duration.ofSeconds(5), 3200);
+        var result = GetThumbnailTool.execute(
+                request, PathValidator.allowAll(), factory);
+
+        assertSuccess(result, tr -> {
+            assertEquals(Projection.MID_SLICE, tr.projectionUsed(),
+                    "adaptive should fall back to mid-slice with tight budget");
+            assertNotNull(decodePng(tr.png()));
+        });
+    }
+
+    @Test
+    void adaptiveWithSingleZSliceUsesMidSlice() {
+        // sizeZ=1: no upgrade possible, should use MID_SLICE
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(16, 16, 1, 2, 1, PixelType.UINT8))
+                .build();
+        var request = new GetThumbnailTool.Request(
+                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                Duration.ofSeconds(5), 256L * 1024 * 1024);
+        var result = GetThumbnailTool.execute(
+                request, PathValidator.allowAll(), factory);
+
+        assertSuccess(result, tr ->
+            assertEquals(Projection.MID_SLICE, tr.projectionUsed(),
+                    "sizeZ=1 should resolve to mid-slice"));
+    }
+
+    @Test
+    void adaptiveMaxMatchesExplicitMax() {
+        // When adaptive upgrades to max, the result should match
+        // an explicit MAX_INTENSITY request
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(16, 16, 5, 1, 1, PixelType.UINT8))
+                .build();
+
+        var adaptiveReq = new GetThumbnailTool.Request(
+                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                Duration.ofSeconds(5), 256L * 1024 * 1024);
+        var explicitReq = new GetThumbnailTool.Request(
+                "/img.tif", 0, Projection.MAX_INTENSITY, null, 0, 1024,
+                Duration.ofSeconds(5), 256L * 1024 * 1024);
+
+        var adaptiveResult = GetThumbnailTool.execute(
+                adaptiveReq, PathValidator.allowAll(), factory);
+        var explicitResult = GetThumbnailTool.execute(
+                explicitReq, PathValidator.allowAll(), factory);
+
+        assertSuccess(adaptiveResult, adaptiveTr -> {
+            assertEquals(Projection.MAX_INTENSITY,
+                    adaptiveTr.projectionUsed());
+            assertSuccess(explicitResult, explicitTr ->
+                assertArrayEquals(explicitTr.png(), adaptiveTr.png(),
+                        "adaptive max should match explicit max"));
+        });
+    }
+
+    @Test
+    void adaptiveIsDefaultProjection() {
+        var request = GetThumbnailTool.Request.of("/img.tif");
+        assertEquals(Projection.ADAPTIVE, request.projection());
     }
 
     // ================================================================
@@ -178,7 +274,7 @@ class GetThumbnailToolTest {
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
 
-        assertSuccess(result, png -> {
+        assertSuccessPng(result, png -> {
             var image = decodePng(png);
             // With two channels composited, we should see non-zero values
             // in R, G, and B (cyan has G+B, magenta has R+B)
@@ -215,8 +311,8 @@ class GetThumbnailToolTest {
         var subResult = GetThumbnailTool.execute(
                 subReq, PathValidator.allowAll(), factory);
 
-        assertSuccess(allResult, allPng ->
-            assertSuccess(subResult, subPng ->
+        assertSuccessPng(allResult, allPng ->
+            assertSuccessPng(subResult, subPng ->
                 assertFalse(java.util.Arrays.equals(allPng, subPng),
                         "channel subset should differ from all channels")));
     }
@@ -238,7 +334,7 @@ class GetThumbnailToolTest {
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
 
-        assertSuccess(result, png -> {
+        assertSuccessPng(result, png -> {
             var image = decodePng(png);
             // Should be red-tinted (G=0, B=0 for non-zero pixels)
             boolean foundRed = false;
@@ -274,7 +370,7 @@ class GetThumbnailToolTest {
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
 
-        assertSuccess(result, png -> {
+        assertSuccessPng(result, png -> {
             var image = decodePng(png);
             assertEquals(64, image.getWidth());
             assertEquals(32, image.getHeight());
@@ -292,7 +388,7 @@ class GetThumbnailToolTest {
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
 
-        assertSuccess(result, png -> {
+        assertSuccessPng(result, png -> {
             var image = decodePng(png);
             assertEquals(32, image.getWidth());
             assertEquals(32, image.getHeight());
@@ -314,7 +410,7 @@ class GetThumbnailToolTest {
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
 
-        assertSuccess(result, png -> {
+        assertSuccessPng(result, png -> {
             var image = decodePng(png);
             assertEquals(32, image.getWidth());
             assertEquals(32, image.getHeight());
@@ -451,7 +547,8 @@ class GetThumbnailToolTest {
     }
 
     @Test
-    void byteBudgetExceeded() {
+    void explicitMaxByteBudgetExceeded() {
+        // Explicit MAX_INTENSITY with tight budget should still fail hard
         // 3 channels × 5 Z slices × 64×64 = 61440 bytes, budget is 1000
         Supplier<ImageReader> factory = () -> FakeImageReader.builder()
                 .addSeries(FakeSeries.simple(64, 64, 5, 3, 1, PixelType.UINT8))
@@ -462,6 +559,41 @@ class GetThumbnailToolTest {
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
         assertFailure(result, ErrorKind.INVALID_ARGUMENT, "maxBytes");
+    }
+
+    @Test
+    void adaptiveByteBudgetDegrades() {
+        // Same scenario as above but with ADAPTIVE — should degrade, not fail
+        // 3 channels × 5 Z slices × 64×64 = 61440 bytes for max,
+        // but 3 × 1 × 4096 = 12288 for mid-slice; budget = 15000
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(64, 64, 5, 3, 1, PixelType.UINT8))
+                .build();
+        var request = new GetThumbnailTool.Request(
+                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                Duration.ofSeconds(5), 15000);
+        var result = GetThumbnailTool.execute(
+                request, PathValidator.allowAll(), factory);
+
+        assertSuccess(result, tr -> {
+            assertEquals(Projection.MID_SLICE, tr.projectionUsed(),
+                    "adaptive should degrade to mid-slice, not fail");
+            assertNotNull(decodePng(tr.png()));
+        });
+    }
+
+    @Test
+    void adaptiveFailsWhenEvenMidSliceExceedsBudget() {
+        // Budget too small for even mid-slice: 3 channels × 64×64 = 12288
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(64, 64, 5, 3, 1, PixelType.UINT8))
+                .build();
+        var request = new GetThumbnailTool.Request(
+                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                Duration.ofSeconds(5), 1000);
+        var result = GetThumbnailTool.execute(
+                request, PathValidator.allowAll(), factory);
+        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "mid-slice");
     }
 
     @Test
@@ -479,6 +611,16 @@ class GetThumbnailToolTest {
                         "/img.tif", 0, Projection.MID_SLICE,
                         new int[] { -1 },
                         0, 1024, Duration.ofSeconds(5), 256L * 1024 * 1024));
+    }
+
+    // ================================================================
+    // ThumbnailResult validation
+    // ================================================================
+
+    @Test
+    void thumbnailResultRejectsAdaptiveProjection() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new ThumbnailResult(new byte[] { 1 }, Projection.ADAPTIVE));
     }
 
     // ================================================================
@@ -505,7 +647,7 @@ class GetThumbnailToolTest {
     // Helpers
     // ================================================================
 
-    private ToolResult<byte[]> runSimple(String path) {
+    private ToolResult<ThumbnailResult> runSimple(String path) {
         var request = new GetThumbnailTool.Request(
                 path, 0, Projection.MID_SLICE, null, 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
@@ -537,20 +679,27 @@ class GetThumbnailToolTest {
         return sum;
     }
 
-    private static <T> void assertSuccess(ToolResult<T> result,
-                                           java.util.function.Consumer<T> check) {
-        if (result instanceof ToolResult.Success<T> s) {
+    /** Assert success and check the ThumbnailResult. */
+    private static void assertSuccess(ToolResult<ThumbnailResult> result,
+                                       java.util.function.Consumer<ThumbnailResult> check) {
+        if (result instanceof ToolResult.Success<ThumbnailResult> s) {
             check.accept(s.value());
         } else {
-            var f = (ToolResult.Failure<T>) result;
+            var f = (ToolResult.Failure<ThumbnailResult>) result;
             fail("expected success, got " + f.kind() + ": " + f.message());
         }
     }
 
-    private static <T> void assertFailure(ToolResult<T> result,
-                                           ErrorKind expectedKind,
-                                           String messageContains) {
-        if (result instanceof ToolResult.Failure<T> f) {
+    /** Assert success and check the PNG bytes directly. */
+    private static void assertSuccessPng(ToolResult<ThumbnailResult> result,
+                                          java.util.function.Consumer<byte[]> check) {
+        assertSuccess(result, tr -> check.accept(tr.png()));
+    }
+
+    private static void assertFailure(ToolResult<ThumbnailResult> result,
+                                       ErrorKind expectedKind,
+                                       String messageContains) {
+        if (result instanceof ToolResult.Failure<ThumbnailResult> f) {
             assertEquals(expectedKind, f.kind());
             assertTrue(f.message().toLowerCase().contains(
                     messageContains.toLowerCase()),
