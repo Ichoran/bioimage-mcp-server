@@ -41,6 +41,17 @@ look up API details, pixel type constants, metadata accessors, etc.
   pixel types with correct signedness/byte order, plus uint8 mapping
   (auto-contrast via percentile stretch or full-range normalization).
   Area-average downsampling.  15 tool tests + 20 converter tests.
+- **Phase 2c: `get_intensity_stats`** — `StatsAccumulator` (sealed class,
+  two implementations) accumulates stats across multiple planes without
+  converting everything to double arrays.  `ExactAccumulator` for 8/16-bit
+  types uses counting arrays for exact percentiles and histograms.
+  `DigestAccumulator` for 32-bit/float/double uses t-digest (`com.tdunning:
+  t-digest:3.3`) for streaming percentile estimation, with histogram derived
+  from the digest CDF at finish time.  `GetIntensityStatsTool` orchestrates
+  reading planes, respects byte budgets via even subsampling (reduce timepoints
+  first, then Z).  Supports `Range` parameters for channel/Z/T selection;
+  `StatsResult` wrapper includes resolved ranges and actual indices used.
+  33 accumulator tests + 27 tool tests.
 
 
 ## Phase 2: Tools against the fake reader
@@ -48,12 +59,6 @@ look up API details, pixel type constants, metadata accessors, etc.
 Build each tool as a pure function: (reader, request) → response.  No
 MCP protocol awareness — just Java methods that take structured input and
 return structured output.  All tested against the fake reader.
-
-### 2c. `get_intensity_stats`
-
-Statistics over pixel data.  The math (histogram, percentiles,
-saturation detection, bit-depth utilization) can be tested with known
-synthetic arrays where we can compute expected results by hand.
 
 ### 2d. `get_thumbnail`
 

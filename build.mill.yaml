@@ -8,3 +8,4 @@ repositories:
 mvnDeps:
 - ome:formats-gpl:8.4.0
 - io.modelcontextprotocol.sdk:mcp:1.1.0
+- com.tdunning:t-digest:3.3
