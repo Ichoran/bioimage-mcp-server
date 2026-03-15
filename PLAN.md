@@ -17,39 +17,16 @@ look up API details, pixel type constants, metadata accessors, etc.
   exact unit conversion), `ChannelInfo`, `InstrumentInfo`, `PlaneCoordinate`,
   `SeriesInfo`, `ImageMetadata` (with `SeriesSummary` and `DetailLevel`),
   `IntensityStats`.  All in `src/server/`, tested.
-
-
-## Phase 1: Data model and reader abstraction
-
-The goal is to define all the types that tools consume and produce, plus
-the reader interface, before writing any tool logic.  Everything here is
-pure Java with no external dependencies — fully unit-testable.
-
-### 1b. Reader abstraction interface
-
-Define `formats/ImageReader` (interface) with methods like:
-- `open(Path)` / `close()` — lifecycle
-- `getMetadata(series, detailLevel)` → `ImageMetadata`
-- `readPlane(series, channel, z, t)` → raw pixel array or buffer
-- `getSeriesCount()`, `getPixelType()`, etc.
-
-This is the boundary between tool logic and format-specific code.
-Nothing in `tools/` should ever import a Bio-Formats type.
-
-Note: Bio-Formats already abstracts over itself (`IFormatReader` in
-the BSD-licensed `formats-api`), and swapping `formats-gpl` for
-`formats-bsd` is just a dependency change.  Our abstraction is not for
-GPL isolation — it's for testability (fake readers), API shaping
-(`IFormatReader` has 100+ methods; our tools need ~10), and the
-flexibility to add non-Bio-Formats readers in the future (e.g. direct
-OME-ZARR, tifffile via Python).  We are architecting *in* Bio-Formats
-for its capabilities, not architecting *out* everything else.
-
-### 1c. Test reader implementation
-
-A fake `ImageReader` that returns synthetic data (e.g. gradient images,
-known metadata values).  Lives in `test/`.  This lets us test every tool
-thoroughly without needing real microscopy files or Bio-Formats.
+- **Phase 1b: Reader abstraction** — `ImageReader` interface with 5 methods:
+  `open`/`close` lifecycle, `getSeriesCount`, `getMetadata(series, detailLevel)`,
+  `isLittleEndian(series)`, `readPlane(series, channel, z, timepoint)`.
+  Returns raw `byte[]` in row-major order; tools get dimensions and pixel type
+  from `SeriesInfo` via `getMetadata`.
+- **Phase 1c: Fake reader** — `FakeImageReader` (in `test/`) with builder
+  pattern and `FakeSeries` record.  Deterministic pixel formula
+  (`y*sizeX + x + c*7 + z*13 + t*31` mod type range) lets tests compute
+  expected values independently.  Detail-level filtering, configurable byte
+  order, coordinate validation.  22 tests.
 
 
 ## Phase 2: Tools against the fake reader
