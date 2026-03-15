@@ -167,8 +167,9 @@ class GetIntensityStatsToolTest {
     // ================================================================
 
     @Test
-    void defaultsToTimepointZero() {
-        // With multiple timepoints, default should use only t=0
+    void adaptiveReadsAllTimepointsWhenSmall() {
+        // With multiple timepoints and generous budget, adaptive
+        // reads all of them
         Supplier<ImageReader> factory = () -> FakeImageReader.builder()
                 .addSeries(FakeSeries.simple(4, 4, 1, 1, 5,
                         PixelType.UINT8))
@@ -181,10 +182,11 @@ class GetIntensityStatsToolTest {
             long histTotal = 0;
             for (long c : sr.perChannel().get(0).histogramCounts())
                 histTotal += c;
-            // Only 1 timepoint × 1 Z × 16 pixels
-            assertEquals(16, histTotal);
+            // All 5 timepoints × 1 Z × 16 pixels = 80
+            assertEquals(80, histTotal);
             assertEquals(0, sr.tRange().start());
-            assertEquals(0, sr.tRange().end());
+            assertEquals(4, sr.tRange().end());
+            assertEquals(5, sr.timepointsUsed().length);
         });
     }
 
@@ -280,6 +282,80 @@ class GetIntensityStatsToolTest {
             assertEquals(1, sr.tRange().start());
             assertEquals(3, sr.tRange().end());
             assertEquals(3, sr.timepointsUsed().length);
+        });
+    }
+
+    @Test
+    void adaptiveStopsByByteBudget() {
+        // 32x32, 1C, 10Z, 1T.  Each plane = 1024 bytes.
+        // Budget = 3072 → can afford 3 planes.
+        // Adaptive should read 3 out of 10 Z-slices.
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(32, 32, 10, 1, 1,
+                        PixelType.UINT8))
+                .build();
+        var request = new GetIntensityStatsTool.Request(
+                "/image.tif", 0, null, null, null, 256,
+                Duration.ofSeconds(5), 3072);
+        var result = GetIntensityStatsTool.execute(
+                request, PathValidator.allowAll(), factory);
+
+        assertSuccess(result, sr -> {
+            assertTrue(sr.perChannel().get(0).sampled());
+            assertEquals(3, sr.zSlicesUsed().length);
+            // Reports full range even though only 3 read
+            assertEquals(0, sr.zRange().start());
+            assertEquals(9, sr.zRange().end());
+        });
+    }
+
+    @Test
+    void adaptiveVolumeReadsFullZBeforeStopping() {
+        // 4x4, 1C, 4Z, 5T.  Both Z>1 and T>1 → volume mode.
+        // Each plane = 16 bytes.  Volume = 4 planes = 64 bytes.
+        // Budget = 100 bytes → fits 1 volume but not 2.
+        // Should read exactly 1 full Z-stack (all 4 Z at t=0).
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(4, 4, 4, 1, 5,
+                        PixelType.UINT8))
+                .build();
+        var request = new GetIntensityStatsTool.Request(
+                "/image.tif", 0, null, null, null, 256,
+                Duration.ofSeconds(5), 100);
+        var result = GetIntensityStatsTool.execute(
+                request, PathValidator.allowAll(), factory);
+
+        assertSuccess(result, sr -> {
+            // Should have read all 4 Z-slices
+            assertEquals(4, sr.zSlicesUsed().length);
+            // But only 1 timepoint
+            assertEquals(1, sr.timepointsUsed().length);
+            assertTrue(sr.perChannel().get(0).sampled());
+        });
+    }
+
+    @Test
+    void adaptiveVolumeMultiChannel() {
+        // 4x4, 2C, 3Z, 4T.  Volume mode.
+        // Each plane = 16 bytes.  Volume = 2C × 3Z = 6 planes = 96 bytes.
+        // Budget = 250 bytes → fits 2 volumes but not 3.
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(4, 4, 3, 2, 4,
+                        PixelType.UINT8))
+                .build();
+        var request = new GetIntensityStatsTool.Request(
+                "/image.tif", 0, null, null, null, 256,
+                Duration.ofSeconds(5), 250);
+        var result = GetIntensityStatsTool.execute(
+                request, PathValidator.allowAll(), factory);
+
+        assertSuccess(result, sr -> {
+            assertEquals(2, sr.perChannel().size());
+            // All 3 Z-slices read
+            assertEquals(3, sr.zSlicesUsed().length);
+            // 2 timepoints fit (96 + 96 = 192 ≤ 250, 192 + 96 = 288 > 250)
+            assertEquals(2, sr.timepointsUsed().length);
+            assertTrue(sr.perChannel().get(0).sampled());
         });
     }
 

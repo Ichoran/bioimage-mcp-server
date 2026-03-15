@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.nio.ByteOrder;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -19,6 +20,16 @@ import java.util.function.Supplier;
  * fractions, and bit-depth utilization.  Uses {@link StatsAccumulator}
  * for efficient streaming computation across multiple Z-slices and
  * timepoints.
+ *
+ * <h3>Adaptive vs explicit reading</h3>
+ *
+ * <p>When dimension ranges are explicitly specified, all requested
+ * planes are read (with even subsampling if they exceed the byte
+ * budget).  When ranges are left null (defaults), the tool reads
+ * adaptively: it monitors per-plane read time via
+ * {@link ReadRateEstimator} and stops when the 90th-percentile
+ * prediction would exceed the time budget.  This prevents naive
+ * default calls from hanging on huge files.
  */
 public final class GetIntensityStatsTool {
 
@@ -26,6 +37,9 @@ public final class GetIntensityStatsTool {
 
     /** Default number of histogram bins. */
     static final int DEFAULT_HISTOGRAM_BINS = 256;
+
+    /** Confidence level for adaptive budget estimation. */
+    static final double BUDGET_CONFIDENCE = 0.90;
 
     /**
      * An inclusive range of indices.  A null Range means "use the
@@ -73,15 +87,20 @@ public final class GetIntensityStatsTool {
      * <p>Each dimension (channel, Z, T) accepts a nullable {@link Range}:
      * <ul>
      *   <li>{@code null} channels → all channels
-     *   <li>{@code null} Z → all Z-slices
-     *   <li>{@code null} T → timepoint 0 only (per DESIGN.md)
+     *   <li>{@code null} Z → all Z-slices (adaptive)
+     *   <li>{@code null} T → all timepoints (adaptive)
      * </ul>
+     *
+     * <p>When Z and/or T are null, the tool reads adaptively: it
+     * monitors read rate and stops before exceeding the time or byte
+     * budget.  When explicit ranges are given, it reads all requested
+     * planes (subsampling evenly if necessary to stay in byte budget).
      *
      * @param path           path to the image file
      * @param series         zero-based series index
      * @param channels       channel range, or null for all
-     * @param zRange         Z-slice range, or null for all Z
-     * @param tRange         timepoint range, or null for timepoint 0
+     * @param zRange         Z-slice range, or null for adaptive
+     * @param tRange         timepoint range, or null for adaptive
      * @param histogramBins  number of bins for the output histogram
      * @param timeout        wall-clock time limit
      * @param maxBytes       approximate cap on raw pixel bytes to read
@@ -135,9 +154,14 @@ public final class GetIntensityStatsTool {
                     maxBytes != null ? maxBytes : DEFAULT_MAX_BYTES);
         }
 
-        /** Minimal: all defaults, all channels, all Z, timepoint 0. */
+        /** Minimal: all defaults, all channels, adaptive Z and T. */
         public static Request of(String path) {
             return of(path, null, null, null, null, null, null, null);
+        }
+
+        /** Whether Z and/or T ranges were left to defaults (adaptive). */
+        boolean isAdaptive() {
+            return zRange == null || tRange == null;
         }
     }
 
@@ -202,88 +226,279 @@ public final class GetIntensityStatsTool {
                         request.series(), DetailLevel.SUMMARY);
                 var si = meta.detailedSeries();
 
-                // Resolve ranges against actual series dimensions
+                // Resolve channel range (always fully resolved)
                 Range channelRange = resolveChannelRange(
                         request.channels(), si);
-                Range zRange = resolveZRange(request.zRange(), si);
-                Range tRange = resolveTRange(request.tRange(), si);
-
                 int[] channelIndices = channelRange.toArray();
-                int[] zIndices = zRange.toArray();
-                int[] tIndices = tRange.toArray();
 
-                // Check byte budget
+                // Full Z and T ranges (what the series offers)
+                Range fullZ = new Range(0, si.sizeZ() - 1);
+                Range fullT = new Range(0, si.sizeT() - 1);
+
+                // Resolve explicit ranges (validate bounds)
+                Range requestedZ = request.zRange() != null
+                        ? validateZRange(request.zRange(), si) : fullZ;
+                Range requestedT = request.tRange() != null
+                        ? validateTRange(request.tRange(), si) : fullT;
+
                 long bytesPerPlane = (long) si.sizeX() * si.sizeY()
                         * si.pixelType().bytesPerPixel();
-                long totalPlanes = (long) channelIndices.length
-                        * zIndices.length * tIndices.length;
-                long totalBytes = bytesPerPlane * totalPlanes;
 
-                boolean sampled = false;
-                double sampledFraction = 1.0;
-                int[] usedZ = zIndices;
-                int[] usedT = tIndices;
-
-                if (totalBytes > request.maxBytes()) {
-                    long maxPlanes = request.maxBytes() / bytesPerPlane;
-                    if (maxPlanes < channelIndices.length) {
-                        throw new IllegalArgumentException(
-                                "byte budget (" + request.maxBytes()
-                                + ") too small for even one plane per channel"
-                                + " (" + bytesPerPlane + " bytes/plane, "
-                                + channelIndices.length + " channels)");
-                    }
-                    long planesPerChannel = maxPlanes / channelIndices.length;
-                    var sub = subsamplePlanes(
-                            zIndices, tIndices, (int) planesPerChannel);
-                    usedZ = sub.zSlices;
-                    usedT = sub.timepoints;
-                    sampled = true;
-                    long sampledPlanes = (long) channelIndices.length
-                            * usedZ.length * usedT.length;
-                    sampledFraction = (double) sampledPlanes / totalPlanes;
+                // Sanity: must fit at least one plane per channel
+                if (bytesPerPlane * channelIndices.length
+                        > request.maxBytes()) {
+                    throw new IllegalArgumentException(
+                            "byte budget (" + request.maxBytes()
+                            + ") too small for even one plane per channel"
+                            + " (" + bytesPerPlane + " bytes/plane, "
+                            + channelIndices.length + " channels)");
                 }
 
-                // Set up accumulators
                 ByteOrder order = reader.isLittleEndian(request.series())
                         ? ByteOrder.LITTLE_ENDIAN : ByteOrder.BIG_ENDIAN;
-                var accumulators = new StatsAccumulator[channelIndices.length];
-                for (int i = 0; i < channelIndices.length; i++) {
-                    accumulators[i] = StatsAccumulator.create(
-                            channelIndices[i], si.pixelType());
-                }
 
-                // Read planes and accumulate
-                for (int t : usedT) {
-                    for (int z : usedZ) {
-                        for (int i = 0; i < channelIndices.length; i++) {
-                            byte[] raw = reader.readPlane(
-                                    request.series(), channelIndices[i], z, t);
-                            accumulators[i].addPlane(raw, order);
-                        }
-                    }
-                }
+                boolean adaptive = request.zRange() == null
+                        || request.tRange() == null;
 
-                // Finalize
-                var perChannel = new ArrayList<IntensityStats>(
-                        channelIndices.length);
-                for (int i = 0; i < channelIndices.length; i++) {
-                    perChannel.add(accumulators[i].finish(
-                            request.histogramBins(), sampled, sampledFraction));
+                if (adaptive) {
+                    return readAdaptive(
+                            reader, request, si, channelRange,
+                            channelIndices, requestedZ, requestedT,
+                            bytesPerPlane, order);
+                } else {
+                    return readExplicit(
+                            reader, request, si, channelRange,
+                            channelIndices, requestedZ, requestedT,
+                            bytesPerPlane, order);
                 }
-
-                return new StatsResult(
-                        perChannel, channelRange, zRange, tRange,
-                        usedZ, usedT, si.pixelType());
             }
         });
 
         return unwrap(result);
     }
 
+    // ================================================================
+    // Explicit reading: all requested planes, subsampled if over budget
+    // ================================================================
+
+    private static StatsResult readExplicit(
+            ImageReader reader, Request request, SeriesInfo si,
+            Range channelRange, int[] channelIndices,
+            Range zRange, Range tRange,
+            long bytesPerPlane, ByteOrder order) throws IOException {
+
+        int[] zIndices = zRange.toArray();
+        int[] tIndices = tRange.toArray();
+
+        long totalPlanes = (long) channelIndices.length
+                * zIndices.length * tIndices.length;
+        long totalBytes = bytesPerPlane * totalPlanes;
+
+        boolean sampled = false;
+        double sampledFraction = 1.0;
+        int[] usedZ = zIndices;
+        int[] usedT = tIndices;
+
+        if (totalBytes > request.maxBytes()) {
+            long maxPlanes = request.maxBytes() / bytesPerPlane;
+            long planesPerChannel = maxPlanes / channelIndices.length;
+            var sub = subsamplePlanes(
+                    zIndices, tIndices, (int) planesPerChannel);
+            usedZ = sub.zSlices;
+            usedT = sub.timepoints;
+            sampled = true;
+            long sampledPlanes = (long) channelIndices.length
+                    * usedZ.length * usedT.length;
+            sampledFraction = (double) sampledPlanes / totalPlanes;
+        }
+
+        var accumulators = createAccumulators(channelIndices, si.pixelType());
+        readPlanes(reader, request.series(), channelIndices,
+                usedZ, usedT, accumulators, order);
+
+        return buildResult(accumulators, request.histogramBins(),
+                sampled, sampledFraction, channelRange, zRange, tRange,
+                usedZ, usedT, si.pixelType());
+    }
+
+    // ================================================================
+    // Adaptive reading: monitor rate, stop before exceeding budget
+    // ================================================================
+
+    private static StatsResult readAdaptive(
+            ImageReader reader, Request request, SeriesInfo si,
+            Range channelRange, int[] channelIndices,
+            Range fullZ, Range fullT,
+            long bytesPerPlane, ByteOrder order) throws IOException {
+
+        int[] allZ = fullZ.toArray();
+        int[] allT = fullT.toArray();
+        int nChannels = channelIndices.length;
+
+        // Decide step granularity:
+        // If both Z > 1 and T > 1, step by full Z-volume per timepoint.
+        // Otherwise, step by individual planes (one z,t combo × all channels).
+        boolean volumeMode = allZ.length > 1 && allT.length > 1;
+        int planesPerStep = volumeMode
+                ? nChannels * allZ.length   // one full Z-stack × all channels
+                : nChannels;                // one plane × all channels
+
+        long bytesPerStep = bytesPerPlane * planesPerStep;
+        long budgetNanos = request.timeout().toNanos();
+        // Use 90% of the timeout as the read budget — leave room for
+        // finalization (histogram, percentiles, etc.)
+        long readBudgetNanos = (long) (budgetNanos * 0.9);
+
+        var estimator = new ReadRateEstimator(readBudgetNanos, BUDGET_CONFIDENCE);
+        var accumulators = createAccumulators(channelIndices, si.pixelType());
+
+        long bytesRead = 0;
+        long startNanos = System.nanoTime();
+
+        // Track which Z and T indices we actually read
+        var usedZList = new ArrayList<Integer>();
+        var usedTList = new ArrayList<Integer>();
+
+        if (volumeMode) {
+            // Step through timepoints, reading full Z-stacks
+            for (int ti = 0; ti < allT.length; ti++) {
+                int t = allT[ti];
+
+                // Byte budget check (exact)
+                if (bytesRead + bytesPerStep > request.maxBytes()) {
+                    break;
+                }
+
+                // Time budget check (estimated, after minimum observations)
+                if (!estimator.canAfford(planesPerStep)) {
+                    break;
+                }
+
+                // Read full Z-stack for this timepoint
+                for (int z : allZ) {
+                    for (int i = 0; i < nChannels; i++) {
+                        byte[] raw = reader.readPlane(
+                                request.series(), channelIndices[i], z, t);
+                        accumulators[i].addPlane(raw, order);
+                    }
+                }
+                bytesRead += bytesPerStep;
+                usedTList.add(t);
+
+                long elapsed = System.nanoTime() - startNanos;
+                estimator.recordStep(planesPerStep, elapsed);
+
+                // Record Z indices on first pass
+                if (ti == 0) {
+                    for (int z : allZ) usedZList.add(z);
+                }
+            }
+        } else {
+            // Step through (z, t) pairs individually
+            // Iterate T outer, Z inner — consistent with volume mode
+            for (int t : allT) {
+                for (int z : allZ) {
+                    // Byte budget check (exact)
+                    if (bytesRead + bytesPerStep > request.maxBytes()) {
+                        break;
+                    }
+
+                    // Time budget check (estimated)
+                    if (!estimator.canAfford(planesPerStep)) {
+                        break;
+                    }
+
+                    for (int i = 0; i < nChannels; i++) {
+                        byte[] raw = reader.readPlane(
+                                request.series(), channelIndices[i], z, t);
+                        accumulators[i].addPlane(raw, order);
+                    }
+                    bytesRead += bytesPerStep;
+
+                    long elapsed = System.nanoTime() - startNanos;
+                    estimator.recordStep(planesPerStep, elapsed);
+
+                    if (!usedZList.contains(z)) usedZList.add(z);
+                    if (!usedTList.contains(t)) usedTList.add(t);
+                }
+                // If inner loop broke out early, stop outer too
+                if (bytesRead + bytesPerStep > request.maxBytes()
+                        || !estimator.canAfford(planesPerStep)) {
+                    break;
+                }
+            }
+        }
+
+        // Determine what we actually read
+        int[] usedZ = usedZList.stream().mapToInt(Integer::intValue).toArray();
+        int[] usedT = usedTList.stream().mapToInt(Integer::intValue).toArray();
+
+        if (usedZ.length == 0 || usedT.length == 0) {
+            throw new IllegalStateException(
+                    "budget too small to read even a single step");
+        }
+
+        // Compute the full requested ranges for reporting
+        Range reportZ = fullZ;
+        Range reportT = fullT;
+
+        long totalPlanes = (long) nChannels * allZ.length * allT.length;
+        long actualPlanes = estimator.totalPlanesRead();
+        boolean sampled = actualPlanes < totalPlanes;
+        double sampledFraction = (double) actualPlanes / totalPlanes;
+
+        return buildResult(accumulators, request.histogramBins(),
+                sampled, sampledFraction, channelRange, reportZ, reportT,
+                usedZ, usedT, si.pixelType());
+    }
+
+    // ================================================================
+    // Shared helpers
+    // ================================================================
+
+    private static StatsAccumulator[] createAccumulators(
+            int[] channelIndices, PixelType pixelType) {
+        var accumulators = new StatsAccumulator[channelIndices.length];
+        for (int i = 0; i < channelIndices.length; i++) {
+            accumulators[i] = StatsAccumulator.create(
+                    channelIndices[i], pixelType);
+        }
+        return accumulators;
+    }
+
+    private static void readPlanes(
+            ImageReader reader, int series, int[] channelIndices,
+            int[] zIndices, int[] tIndices,
+            StatsAccumulator[] accumulators, ByteOrder order)
+            throws IOException {
+        for (int t : tIndices) {
+            for (int z : zIndices) {
+                for (int i = 0; i < channelIndices.length; i++) {
+                    byte[] raw = reader.readPlane(
+                            series, channelIndices[i], z, t);
+                    accumulators[i].addPlane(raw, order);
+                }
+            }
+        }
+    }
+
+    private static StatsResult buildResult(
+            StatsAccumulator[] accumulators, int histogramBins,
+            boolean sampled, double sampledFraction,
+            Range channelRange, Range zRange, Range tRange,
+            int[] usedZ, int[] usedT, PixelType pixelType) {
+        var perChannel = new ArrayList<IntensityStats>(accumulators.length);
+        for (var acc : accumulators) {
+            perChannel.add(acc.finish(histogramBins, sampled, sampledFraction));
+        }
+        return new StatsResult(
+                perChannel, channelRange, zRange, tRange,
+                usedZ, usedT, pixelType);
+    }
+
     // ---- Range resolution ----
 
-    private static Range resolveChannelRange(Range requested, SeriesInfo si) {
+    static Range resolveChannelRange(Range requested, SeriesInfo si) {
         if (requested == null) {
             return new Range(0, si.sizeC() - 1);
         }
@@ -296,10 +511,7 @@ public final class GetIntensityStatsTool {
         return requested;
     }
 
-    private static Range resolveZRange(Range requested, SeriesInfo si) {
-        if (requested == null) {
-            return new Range(0, si.sizeZ() - 1);
-        }
+    private static Range validateZRange(Range requested, SeriesInfo si) {
         if (requested.end() >= si.sizeZ()) {
             throw new IllegalArgumentException(
                     "z range end " + requested.end()
@@ -309,11 +521,7 @@ public final class GetIntensityStatsTool {
         return requested;
     }
 
-    private static Range resolveTRange(Range requested, SeriesInfo si) {
-        if (requested == null) {
-            // Default: timepoint 0 only
-            return new Range(0, 0);
-        }
+    private static Range validateTRange(Range requested, SeriesInfo si) {
         if (requested.end() >= si.sizeT()) {
             throw new IllegalArgumentException(
                     "timepoint range end " + requested.end()
