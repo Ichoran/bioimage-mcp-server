@@ -48,44 +48,56 @@ look up API details, pixel type constants, metadata accessors, etc.
   `DigestAccumulator` for 32-bit/float/double uses t-digest (`com.tdunning:
   t-digest:3.3`) for streaming percentile estimation, with histogram derived
   from the digest CDF at finish time.  `GetIntensityStatsTool` orchestrates
-  reading planes, respects byte budgets via even subsampling (reduce timepoints
-  first, then Z).  Supports `Range` parameters for channel/Z/T selection;
-  `StatsResult` wrapper includes resolved ranges and actual indices used.
-  33 accumulator tests + 27 tool tests.
-
-
-## Phase 2: Tools against the fake reader
-
-Build each tool as a pure function: (reader, request) → response.  No
-MCP protocol awareness — just Java methods that take structured input and
-return structured output.  All tested against the fake reader.
-
-### 2d. `get_thumbnail`
-
-The most complex pixel tool: Z-projection (mid-slice, max-intensity,
-sum), multi-channel compositing with color lookup, and downsampling.
-Builds on the pixel-reading infrastructure from `get_plane`.  Test each
-projection mode, channel color assignment, and downsampling quality
-independently.
-
-### 2e. `export_to_tiff`
-
-Reading + writing.  Needs a writer abstraction (or at least a
-Bio-Formats writer behind the same isolation boundary).  Test that
-round-tripping preserves metadata and pixel data.  Test subsetting
-(channel/z/t ranges).  Test the metadata-loss detection and reporting.
-
-This is last among the tools because it's the most complex and depends
-on having the reading side solid.
+  reading planes with two modes: **explicit** (user specifies ranges, even
+  subsampling if over byte budget) and **adaptive** (null ranges, reads
+  incrementally and stops when 90th-percentile time estimate or byte budget
+  would be exceeded).  Adaptive mode uses `ReadRateEstimator` backed by
+  Commons Math `SimpleRegression` + t-distribution prediction intervals;
+  requires ≥2 observations before trusting estimates.  In volume mode
+  (Z>1 and T>1), steps by full Z-stacks to ensure at least one complete
+  volume per channel.  Supports `Range` parameters for channel/Z/T
+  selection; `StatsResult` wrapper includes resolved ranges and actual
+  indices used.  33 accumulator tests + 30 tool tests + 7 estimator tests.
+- **Phase 2d: `get_thumbnail`** — `GetThumbnailTool` returns
+  `ToolResult<byte[]>` (RGB PNG).  Z-projection via `Projection` enum
+  (MID_SLICE, MAX_INTENSITY, SUM): mid-slice reads only the middle plane,
+  max/sum iterate all Z-slices accumulating per-pixel.  Multi-channel
+  compositing: each channel is auto-contrasted independently (percentile
+  stretch), then additively blended using per-channel colors.  Colors
+  come from `ChannelInfo.color()` (ARGB from OME metadata) with sensible
+  defaults (green for 1-ch, cyan/magenta for 2-ch, cyan/magenta/yellow
+  for 3-ch, rotating palette beyond that).  Area-average RGB downsampling
+  to fit `maxSize`.  Budget via timeout + maxBytes (total across all
+  channels × Z-slices).  28 tests covering projections, compositing,
+  color defaults, metadata colors, downsampling, uint16, and error cases.
+- **Phase 2e: `export_to_tiff`** — `ExportToTiffTool` reads from
+  `ImageReader`, writes to new `ImageWriter` interface.  OME-XML
+  pass-through architecture: reader provides raw OME-XML via new
+  `getOMEXML()` method; `OmeXmlSurgery` (DOM-based) modifies it for
+  subsetting (updates SizeC/Z/T, removes Channel/Plane/TiffData elements,
+  rebuilds TiffData for the subset).  Three metadata modes:
+  `ALL` (full XML including OriginalMetadataAnnotations),
+  `STRUCTURED` (strip OriginalMetadata, keep schema elements),
+  `MINIMAL` (Pixels/Channel/TiffData only).  Compression enum
+  (NONE/LZW/ZLIB).  `ExportResult` reports dimensions written,
+  metadata preservation counts, and warnings about: proprietary format
+  conversion, OriginalMetadata stripping, flat metadata not in XML.
+  `FakeImageReader` generates synthetic OME-XML with configurable
+  OriginalMetadataAnnotations (uses commons-text for XML escaping).
+  `FakeImageWriter` captures all writes for assertions.  Also added
+  `getOriginalMetadataCount()` to `ImageReader` for detecting flat
+  metadata not serialized to OME-XML.  13 XML surgery tests +
+  26 tool tests.
 
 
 ## Phase 3: Budget and resource constraints
 
 Tools already accept timeout and byte-budget parameters with sensible
-defaults, and run inside `CancellableTask`.  This phase is for any
+defaults, and run inside `CancellableTask`.  `get_intensity_stats` has
+adaptive reading with rate estimation (done).  This phase is for any
 remaining budget work that emerges from building the later tools —
-e.g. subsampling strategies for `get_intensity_stats` on huge files,
-or partial-result reporting when budgets force data to be skipped.
+e.g. adaptive reading for `get_thumbnail`, or partial-result reporting
+when budgets force data to be skipped.
 
 
 ## Phase 4: Bio-Formats reader implementation

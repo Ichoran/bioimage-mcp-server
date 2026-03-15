@@ -102,6 +102,48 @@ public interface ImageReader extends AutoCloseable {
             throws IOException;
 
     /**
+     * Returns the OME-XML metadata for the open file, or {@code null}
+     * if the reader does not provide OME-XML.
+     *
+     * <p>When available, this is the complete OME-XML document that
+     * Bio-Formats generates from the source format.  Export tools can
+     * pass this XML through to the output file, surgically modifying
+     * only the elements affected by subsetting, so that metadata the
+     * tool doesn't understand survives the round-trip.
+     *
+     * <p>The XML may include {@code OriginalMetadataAnnotation}
+     * elements containing format-specific key-value pairs that
+     * Bio-Formats extracted but could not map to OME schema elements.
+     *
+     * @return OME-XML string, or {@code null} if not available
+     * @throws IllegalStateException if no file is open
+     */
+    default String getOMEXML() {
+        return null;
+    }
+
+    /**
+     * Returns the number of flat (key-value) metadata entries the
+     * reader extracted from the source format.
+     *
+     * <p>These are format-specific entries (e.g. scanner voltages,
+     * acquisition parameters) that the reader found in the file.
+     * Some may have been mapped to structured OME-XML elements, and
+     * some may appear as {@code OriginalMetadataAnnotation} entries
+     * in the OME-XML (see {@link #getOMEXML()}), but others may
+     * not be serialized at all.
+     *
+     * <p>Export tools can compare this count against the number of
+     * {@code OriginalMetadataAnnotation} entries in the OME-XML to
+     * detect metadata that will not survive format conversion.
+     *
+     * @return count of flat metadata entries, or 0 if unknown
+     */
+    default int getOriginalMetadataCount() {
+        return 0;
+    }
+
+    /**
      * Close the reader and release all resources.
      *
      * <p>After closing, no other methods may be called.  Calling

@@ -1,10 +1,13 @@
 package lab.kerrr.mcpbio.bioimageserver;
 
+import org.apache.commons.text.StringEscapeUtils;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -36,14 +39,17 @@ public final class FakeImageReader implements ImageReader {
     private final String formatName;
     private final List<FakeSeries> seriesList;
     private final boolean littleEndian;
+    private final Map<String, String> originalMetadata;
     private boolean open;
     private Path openedPath;
 
     private FakeImageReader(String formatName, List<FakeSeries> seriesList,
-                            boolean littleEndian) {
+                            boolean littleEndian,
+                            Map<String, String> originalMetadata) {
         this.formatName = formatName;
         this.seriesList = List.copyOf(seriesList);
         this.littleEndian = littleEndian;
+        this.originalMetadata = Map.copyOf(originalMetadata);
     }
 
     // ---- Builder ----
@@ -54,17 +60,29 @@ public final class FakeImageReader implements ImageReader {
         private String formatName = "Fake Format";
         private final List<FakeSeries> series = new ArrayList<>();
         private boolean littleEndian = true;
+        private final Map<String, String> originalMetadata = new LinkedHashMap<>();
 
         public Builder formatName(String name) { this.formatName = name; return this; }
         public Builder littleEndian(boolean le) { this.littleEndian = le; return this; }
 
         public Builder addSeries(FakeSeries s) { series.add(s); return this; }
 
+        /**
+         * Add flat original metadata entries (format-specific key-value
+         * pairs).  These appear both in {@link #getOriginalMetadataCount()}
+         * and as OriginalMetadataAnnotation entries in {@link #getOMEXML()}.
+         */
+        public Builder originalMetadata(Map<String, String> meta) {
+            this.originalMetadata.putAll(meta);
+            return this;
+        }
+
         public FakeImageReader build() {
             if (series.isEmpty()) {
                 throw new IllegalStateException("must add at least one series");
             }
-            return new FakeImageReader(formatName, series, littleEndian);
+            return new FakeImageReader(formatName, series, littleEndian,
+                                       originalMetadata);
         }
     }
 
@@ -170,6 +188,122 @@ public final class FakeImageReader implements ImageReader {
 
     /** Returns whether the reader is currently open. */
     public boolean isOpen() { return open; }
+
+    @Override
+    public String getOMEXML() {
+        checkOpen();
+        return generateOMEXML();
+    }
+
+    @Override
+    public int getOriginalMetadataCount() {
+        checkOpen();
+        return originalMetadata.size();
+    }
+
+    // ---- OME-XML generation ----
+
+    private String generateOMEXML() {
+        var sb = new StringBuilder();
+        sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        sb.append("<OME xmlns=\"http://www.openmicroscopy.org/Schemas/OME/2016-06\">\n");
+
+        for (int s = 0; s < seriesList.size(); s++) {
+            var fs = seriesList.get(s);
+            String seriesName = fs.name() != null ? fs.name() : "Series " + s;
+            sb.append("  <Image ID=\"Image:").append(s)
+              .append("\" Name=\"").append(StringEscapeUtils.escapeXml10(seriesName)).append("\">\n");
+            sb.append("    <Pixels ID=\"Pixels:").append(s)
+              .append("\" DimensionOrder=\"").append(fs.dimensionOrder())
+              .append("\" SizeX=\"").append(fs.sizeX())
+              .append("\" SizeY=\"").append(fs.sizeY())
+              .append("\" SizeZ=\"").append(fs.sizeZ())
+              .append("\" SizeC=\"").append(fs.sizeC())
+              .append("\" SizeT=\"").append(fs.sizeT())
+              .append("\" Type=\"").append(omePixelType(fs.pixelType()))
+              .append("\" BigEndian=\"").append(!littleEndian)
+              .append("\">\n");
+
+            // Channel elements
+            for (int c = 0; c < fs.sizeC(); c++) {
+                String chName = c < fs.channels().size() && fs.channels().get(c).name() != null
+                        ? fs.channels().get(c).name()
+                        : "Channel " + c;
+                sb.append("      <Channel ID=\"Channel:").append(s).append(':').append(c)
+                  .append("\" Name=\"").append(StringEscapeUtils.escapeXml10(chName)).append("\"");
+                if (c < fs.channels().size() && fs.channels().get(c).color().isPresent()) {
+                    sb.append(" Color=\"").append(fs.channels().get(c).color().getAsInt()).append("\"");
+                }
+                sb.append("/>\n");
+            }
+
+            // TiffData elements (one per plane, XYCZT order)
+            int planeIndex = 0;
+            for (int t = 0; t < fs.sizeT(); t++) {
+                for (int z = 0; z < fs.sizeZ(); z++) {
+                    for (int c = 0; c < fs.sizeC(); c++) {
+                        sb.append("      <TiffData FirstC=\"").append(c)
+                          .append("\" FirstZ=\"").append(z)
+                          .append("\" FirstT=\"").append(t)
+                          .append("\" PlaneCount=\"1\" IFD=\"")
+                          .append(planeIndex++).append("\"/>\n");
+                    }
+                }
+            }
+
+            // Plane elements
+            for (int t = 0; t < fs.sizeT(); t++) {
+                for (int z = 0; z < fs.sizeZ(); z++) {
+                    for (int c = 0; c < fs.sizeC(); c++) {
+                        sb.append("      <Plane TheC=\"").append(c)
+                          .append("\" TheZ=\"").append(z)
+                          .append("\" TheT=\"").append(t).append("\"/>\n");
+                    }
+                }
+            }
+
+            sb.append("    </Pixels>\n");
+            sb.append("  </Image>\n");
+        }
+
+        // OriginalMetadataAnnotation entries
+        if (!originalMetadata.isEmpty()) {
+            sb.append("  <StructuredAnnotations>\n");
+            int annIdx = 0;
+            for (var entry : originalMetadata.entrySet()) {
+                sb.append("    <XMLAnnotation ID=\"Annotation:OriginalMetadata:")
+                  .append(annIdx++)
+                  .append("\" Namespace=\"openmicroscopy.org/OriginalMetadata\">\n");
+                sb.append("      <Value>\n");
+                sb.append("        <OriginalMetadata>\n");
+                sb.append("          <Key>").append(StringEscapeUtils.escapeXml10(entry.getKey()))
+                  .append("</Key>\n");
+                sb.append("          <Value>").append(StringEscapeUtils.escapeXml10(entry.getValue()))
+                  .append("</Value>\n");
+                sb.append("        </OriginalMetadata>\n");
+                sb.append("      </Value>\n");
+                sb.append("    </XMLAnnotation>\n");
+            }
+            sb.append("  </StructuredAnnotations>\n");
+        }
+
+        sb.append("</OME>\n");
+        return sb.toString();
+    }
+
+    private static String omePixelType(PixelType type) {
+        return switch (type) {
+            case BIT    -> "bit";
+            case INT8   -> "int8";
+            case UINT8  -> "uint8";
+            case INT16  -> "int16";
+            case UINT16 -> "uint16";
+            case INT32  -> "int32";
+            case UINT32 -> "uint32";
+            case FLOAT  -> "float";
+            case DOUBLE -> "double";
+        };
+    }
 
     // ---- Pixel generation ----
 
