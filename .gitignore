@@ -27,3 +27,7 @@ replay_pid*
 # General editing clutter
 *~
 *.bak
+
+
+# mill build tool
+out/

@@ -3,12 +3,20 @@
 Remove items as they are completed.  Add items when new work is
 identified that deserves its own step.  Re-order when priorities change.
 
+**Reference code:** A local clone of the Bio-Formats repository is at
+`../../java/bioformats` (i.e. `~/Code/java/bioformats`).  Use it to
+look up API details, pixel type constants, metadata accessors, etc.
+
 ## Already done
 
 - Project skeleton, Mill build, JUnit 5 tests
 - `PathAccessControl` — file access security (deny > allow > client roots)
 - `CancellableTask` — virtual-thread work runner with timeout and
   interrupt-with-backoff, plus `Handle` for early cancellation
+- **Phase 1a: Model records** — `PixelType`, `PixelSize` (BigDecimal-backed,
+  exact unit conversion), `ChannelInfo`, `InstrumentInfo`, `PlaneCoordinate`,
+  `SeriesInfo`, `ImageMetadata` (with `SeriesSummary` and `DetailLevel`),
+  `IntensityStats`.  All in `src/server/`, tested.
 
 
 ## Phase 1: Data model and reader abstraction
@@ -16,20 +24,6 @@ identified that deserves its own step.  Re-order when priorities change.
 The goal is to define all the types that tools consume and produce, plus
 the reader interface, before writing any tool logic.  Everything here is
 pure Java with no external dependencies — fully unit-testable.
-
-### 1a. Model records
-
-Define the structured data types in `model/`:
-- `ImageMetadata` — dimensions, pixel type, series info
-- `ChannelInfo` — name, excitation/emission wavelengths, color
-- `PixelSize` — value + unit (µm, nm, etc.)
-- `InstrumentInfo` — objective, magnification, NA, immersion
-- `IntensityStats` — min/max/mean/stddev/median, histogram, saturation
-- `PlaneCoordinate` — (channel, z, timepoint) tuple
-
-These are just records.  No logic beyond maybe validation in compact
-constructors.  The exact set will evolve as we implement tools — start
-with what `inspect_image` needs and grow from there.
 
 ### 1b. Reader abstraction interface
 
