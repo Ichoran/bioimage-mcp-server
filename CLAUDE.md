@@ -28,3 +28,31 @@ errors.
 
 It is important to be familiar with @README.md and @DESIGN.md since these
 documents explain the project in the greatest detail.
+
+@PLAN.md contains the current implementation plan.  Check it at the start
+of each session to see what to work on next, and update it as work is
+completed or priorities change.
+
+# Build system
+
+- **Mill 1.1** is the build tool.
+- The build definition is in `build.mill.yaml` (YAML format, not Scala).
+- Main sources are in `src/server/` with package `lab.kerrr.mcpbio.bioimageserver`.
+- The JVM target is Java 21.
+- Bio-Formats is fetched from the OME Maven repository at
+  `https://artifacts.openmicroscopy.org/artifactory/maven/`.
+- Tests use JUnit 5 (Jupiter), configured in `test/package.mill.yaml`.
+- Test sources are in `test/src/server/` with the same package as main sources.
+- Run tests with `mill test`.
+
+# MCP Java SDK
+
+- The dependency is `io.modelcontextprotocol.sdk:mcp:1.1.0`.
+- Source code: https://github.com/modelcontextprotocol/java-sdk
+- Documentation: https://java.sdk.modelcontextprotocol.io/ (redirected from
+  `https://modelcontextprotocol.github.io/java-sdk/`)
+- The SDK uses **Project Reactor** (`Mono`/`Flux`) internally, with a
+  synchronous facade (`McpSyncServer`) layered on top.
+- This project does **not** use the Spring Boot starters — it is plain Java.
+- When looking up SDK source from the local build cache, check
+  `mill show compile` or coursier cache paths for the resolved jar.

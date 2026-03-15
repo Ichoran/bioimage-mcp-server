@@ -1,0 +1,2 @@
+extends: [build.JavaTests, TestModule.Junit5]
+jupiterVersion: "5.11.4"
