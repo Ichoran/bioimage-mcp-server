@@ -10,6 +10,16 @@ Hand your agent a `.czi` and ask "what channels were acquired?" or
 "is this image saturated?" — no desktop application or one-off script
 required.
 
+## Caution!
+
+This is a very new proof-of-concept implementation.  It has been
+architected to be robust, extensible, and safe.  However, it does not have
+extensive use to find in-practice problems!
+
+Use with caution, but also enthusiasm, because it's nice to have your LLMs
+have better access to your data.  If you see something wrong, or would like
+a feature tweaked, please submit an issue!
+
 
 ## Quick start
 
@@ -17,21 +27,24 @@ required.
 
 - [JBang](https://www.jbang.dev/) (installs and manages the JVM for you)
 
-### Claude Code
+Installation should be [one line on the command-line, listed on the download
+page](https://www.jbang.dev/download/)!
+
+### To use with Claude Code
 
 ```sh
 claude mcp add bioimage-mcp \
   -- jbang https://github.com/ichoran/bioimage-mcp-server/blob/main/runner/bioimage_mcp.java
 ```
 
-Or from a local clone:
+Or from a local clone (adjust the path as needed):
 
 ```sh
 claude mcp add bioimage-mcp \
   -- jbang runner/bioimage_mcp.java
 ```
 
-### Claude Desktop
+### To use with Claude Desktop
 
 Add to your Claude Desktop configuration (`claude_desktop_config.json`):
 
@@ -45,6 +58,11 @@ Add to your Claude Desktop configuration (`claude_desktop_config.json`):
   }
 }
 ```
+
+### Other clients
+
+Instruct the client to run using jbang via URL or local target, using the
+Claude examples as a guide.
 
 ### File access
 
@@ -92,7 +110,9 @@ rationale.
 ### Prerequisites
 
 - [Mill](https://mill-build.org/) 1.1+
-- JDK 21+
+
+Installation [should take one or two lines on the command
+line](https://mill-build.org/mill/cli/installation-ide.html).
 
 ### Commands
 
