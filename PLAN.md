@@ -217,23 +217,56 @@ look up API details, pixel type constants, metadata accessors, etc.
   `CancellableTask` to send `ProgressNotification` during long
   operations.  The `McpSyncServerExchange.progressNotification()`
   method is available but not yet wired.
-- **Integration smoke tests** — stand up a real
-  `StdioServerTransportProvider`, send JSON-RPC messages to stdin,
-  verify responses on stdout.  Deferred to Phase 6 where we test
-  with actual MCP clients.
 
 
 ## Phase 6: Runner and end-to-end
 
-- Create the JBang runner file (`runner/bioimage-mcp.java`)
-- Wire allow/deny path configuration into the runner
+- **JBang runner** — `runner/bioimage-mcp.java` with builder pattern
+  for allow/deny path configuration (commented-out examples).
+  Uses `//DEPS` with Maven coordinates for published releases;
+  developers use `mill run` or `jbang --cp $(mill show assembly)`.
+- **Integration smoke test** — `integration-test/SmokeTest.java`,
+  a standalone JBang script (not part of `mill test`).  Spawns the
+  server as a subprocess via `jbang --quiet --cp <assembly.jar>`,
+  exercises the full MCP protocol over stdio: initialize handshake,
+  tools/list (verifies all 5 tools with schemas), and tool calls
+  for all 5 tools against a synthetic OME-TIFF fixture (also
+  created via a JBang helper script).  9 checks.
+  Run with: `mill assembly && jbang integration-test/SmokeTest.java`
+- **Build fix** — disabled Mill's `prependShellScript` on the
+  assembly jar.  The prepended shell/batch launcher makes the jar
+  unreadable by `javac` on JDK < 25 (`ZipException` — the zip
+  reader in older `javac` doesn't tolerate prefix bytes, though
+  the JVM runtime classloader does).  This broke JBang's `--cp`
+  flag since JBang compiles against the jar.  To re-enable the
+  executable jar feature: set `prependShellScript: default` in
+  `build.mill.yaml`.
+
+### Still to do
+
+- Write an LLM-friendly server description — the `instructions` string
+  in the MCP server builder, and possibly per-tool descriptions, should
+  be written for LLM consumption: when to use this server, what kinds
+  of questions it can answer, what file types it handles, and how the
+  tools relate to each other (inspect first, then thumbnail/stats/plane,
+  export when needed).  This is what the LLM sees when it discovers the
+  server — it needs to be good.
 - Test with Claude Code and/or Claude Desktop as actual MCP clients
 - Verify image display (base64 PNG inline rendering)
-- Verify progress notifications appear in the client
 - Verify error messages are clear and actionable
-- Integration smoke test: send JSON-RPC messages via stdin, verify
-  responses on stdout
+- Progress notifications (deferred from Phase 5)
 
-This is where we discover the gap between "what we thought the transport
-would do" and "what it actually does."  By this point, the gap should be
-small.
+
+## Phase 7: Publishing to Maven Central
+
+- Decide on Maven coordinates (group ID, artifact ID).  Candidates:
+  `lab.kerrr.mcpbio:bioimage-mcp-server`, `io.github.kerrr:bioimage-mcp-server`,
+  etc.  Must match a domain we can verify with Sonatype Central.
+- Set up Sonatype Central (central.sonatype.com) namespace verification.
+- Add publishing configuration to `build.mill.yaml`: POM metadata
+  (description, URL, license, SCM, developer info), GPG signing,
+  Sonatype Central deployment.
+- Update the JBang runner's `//DEPS` line to use the real coordinates.
+- Tag a release, publish 0.1.0.
+- Verify the runner works with the published artifact:
+  `jbang runner/bioimage-mcp.java` with no local build.

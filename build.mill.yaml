@@ -2,6 +2,13 @@ extends: JavaModule
 
 jvmVersion: 21
 
+# Disable the shell/batch launcher that Mill prepends to assembly jars.
+# The prefixed bytes make the jar unreadable by javac on JDK < 25
+# (ZipException), which breaks JBang's --cp flag and similar tooling.
+# To re-enable (makes the jar directly executable as ./out.jar):
+#   prependShellScript: default
+prependShellScript: ""
+
 repositories:
 - https://artifacts.openmicroscopy.org/artifactory/maven/
 
