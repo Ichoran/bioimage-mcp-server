@@ -23,7 +23,7 @@ import java.nio.ByteOrder;
  *       t-digest at finish time, using the observed data range.
  * </ul>
  *
- * <h3>Performance</h3>
+ * <p><b>Performance</b></p>
  * <p>The inner loops are specialized per pixel type — no switch or
  * virtual dispatch per pixel.  The type switch happens once per
  * {@link #addPlane} call, then a dedicated private method runs a

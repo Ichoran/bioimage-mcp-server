@@ -21,7 +21,7 @@ import java.util.function.Supplier;
  * for efficient streaming computation across multiple Z-slices and
  * timepoints.
  *
- * <h3>Adaptive vs explicit reading</h3>
+ * <p><b>Adaptive vs explicit reading</b></p>
  *
  * <p>When dimension ranges are explicitly specified, all requested
  * planes are read (with even subsampling if they exceed the byte

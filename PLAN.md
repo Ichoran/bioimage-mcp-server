@@ -242,31 +242,42 @@ look up API details, pixel type constants, metadata accessors, etc.
   executable jar feature: set `prependShellScript: default` in
   `build.mill.yaml`.
 
+### Done
+
+- **LLM-friendly instructions** — `SERVER_INSTRUCTIONS` constant with
+  recommended workflow (inspect → thumbnail → plane/stats → export),
+  key points (absolute paths, zero-based indices, error kinds).
+  Per-tool descriptions rewritten for LLM consumption: each explains
+  what to use the tool for, not just what it does.
+- **Tested with Claude Code** — all 5 tools exercised against a real
+  Zeiss CZI file (Plate1-Blue-A-02-Scene-1-P2-E1-01.czi).  Thumbnail
+  and single-plane PNG images verified visually — correct channel
+  compositing and auto-contrast.  Error messages verified (ACCESS_DENIED
+  for out-of-scope paths, clear message for nonexistent files).
+- **README** — deployment instructions (Claude Code, Claude Desktop),
+  tool surface, build/dev workflow, project structure.
+
 ### Still to do
 
-- Write an LLM-friendly server description — the `instructions` string
-  in the MCP server builder, and possibly per-tool descriptions, should
-  be written for LLM consumption: when to use this server, what kinds
-  of questions it can answer, what file types it handles, and how the
-  tools relate to each other (inspect first, then thumbnail/stats/plane,
-  export when needed).  This is what the LLM sees when it discovers the
-  server — it needs to be good.
-- Test with Claude Code and/or Claude Desktop as actual MCP clients
-- Verify image display (base64 PNG inline rendering)
-- Verify error messages are clear and actionable
 - Progress notifications (deferred from Phase 5)
+- Test with Claude Desktop
 
 
 ## Phase 7: Publishing to Maven Central
 
-- Decide on Maven coordinates (group ID, artifact ID).  Candidates:
-  `lab.kerrr.mcpbio:bioimage-mcp-server`, `io.github.kerrr:bioimage-mcp-server`,
-  etc.  Must match a domain we can verify with Sonatype Central.
-- Set up Sonatype Central (central.sonatype.com) namespace verification.
-- Add publishing configuration to `build.mill.yaml`: POM metadata
-  (description, URL, license, SCM, developer info), GPG signing,
-  Sonatype Central deployment.
-- Update the JBang runner's `//DEPS` line to use the real coordinates.
-- Tag a release, publish 0.1.0.
+- Maven coordinates decided: `com.github.ichoran:bioimage_mcp_server`.
+- Publishing configuration added to `build.mill.yaml`: `PublishModule`,
+  `publishVersion`, `pomSettings` (description, organization, URL,
+  license, SCM, developer info).  `mill publishLocal` verified.
+- JBang runner updated with correct `//DEPS` and `//REPOS` for OME
+  Maven repository.
+
+### Still to do
+
+- Set environment variables for Sonatype Central credentials and GPG
+  key (`MILL_SONATYPE_USERNAME`, `MILL_SONATYPE_PASSWORD`,
+  `MILL_PGP_SECRET_BASE64`, `MILL_PGP_PASSPHRASE`).
+- Publish: `mill mill.javalib.SonatypeCentralPublishModule/`
+- Tag release `v0.1.0`.
 - Verify the runner works with the published artifact:
   `jbang runner/bioimage-mcp.java` with no local build.

@@ -50,6 +50,41 @@ public class BioImageMcpServer {
     static final String NAME = "bioimage-mcp";
     static final String VERSION = "0.1.0";
 
+    /**
+     * Server-level instructions shown to the LLM when it discovers
+     * this MCP server.  Written for LLM consumption — not end users.
+     */
+    static final String SERVER_INSTRUCTIONS = """
+            BioImage MCP Server reads microscopy image files in 150+ formats \
+            (CZI, ND2, LIF, OME-TIFF, etc.) via Bio-Formats and returns \
+            structured metadata, visual previews, and intensity statistics.
+
+            Recommended workflow:
+            1. inspect_image first — learn dimensions, channels, pixel type, \
+            and physical pixel sizes.  Start with 'summary' detail; request \
+            'standard' for wavelengths/instrument info, 'full' only if \
+            the user needs raw per-plane metadata.
+            2. get_thumbnail for a quick RGB overview (auto-composites \
+            channels, auto-projects Z).
+            3. get_plane to examine a single channel/Z/timepoint at full \
+            resolution (grayscale).
+            4. get_intensity_stats for quantitative assessment — min/max, \
+            mean, histogram, saturation warnings.  Adaptive mode reads \
+            as much data as time and memory allow.
+            5. export_to_tiff to convert to OME-TIFF for downstream tools.
+
+            Key points:
+            - All paths must be absolute.
+            - All indices are zero-based.
+            - Large files are handled safely: tools subsample or time out \
+            rather than hanging.  Check the response for notes about \
+            subsampled data.
+            - Errors are always returned as structured messages with an \
+            error kind (ACCESS_DENIED, INVALID_ARGUMENT, IO_ERROR, TIMEOUT) \
+            — never silently swallowed.
+            - Image tools return base64 PNG.  Text tools return JSON.
+            """;
+
     private final List<Path> denyList;
     private final List<Path> allowList;
 
@@ -127,12 +162,7 @@ public class BioImageMcpServer {
 
         var server = McpServer.sync(transport)
                 .serverInfo(NAME, VERSION)
-                .instructions("BioImage MCP Server provides tools for reading "
-                        + "and inspecting microscopy image files via Bio-Formats. "
-                        + "Use inspect_image to learn about a file's contents, "
-                        + "get_thumbnail or get_plane for visual previews, "
-                        + "get_intensity_stats for quantitative analysis, "
-                        + "and export_to_tiff to convert to open OME-TIFF format.")
+                .instructions(SERVER_INSTRUCTIONS)
                 .capabilities(McpSchema.ServerCapabilities.builder()
                         .tools(true)
                         .build())
@@ -235,10 +265,13 @@ public class BioImageMcpServer {
                 .tool(McpSchema.Tool.builder()
                         .name("inspect_image")
                         .description("Read a microscopy file and return structured "
-                                + "metadata: format, dimensions, pixel type, "
-                                + "physical pixel sizes, channel info, instrument "
-                                + "metadata, and more. Supports 150+ microscopy "
-                                + "formats via Bio-Formats.")
+                                + "metadata as JSON. Always call this first to "
+                                + "learn a file's dimensions (X/Y/Z/C/T), pixel "
+                                + "type, physical pixel sizes, channel names, and "
+                                + "series count. Use 'summary' for a quick look, "
+                                + "'standard' to add wavelengths and instrument "
+                                + "info, 'full' for all metadata. Supports 150+ "
+                                + "formats (CZI, ND2, LIF, OME-TIFF, etc.).")
                         .inputSchema(inspectImageSchema())
                         .annotations(new McpSchema.ToolAnnotations(
                                 null, true, false, true, false, false))
@@ -252,11 +285,12 @@ public class BioImageMcpServer {
         return SyncToolSpecification.builder()
                 .tool(McpSchema.Tool.builder()
                         .name("get_thumbnail")
-                        .description("Generate a quick visual preview of microscopy "
-                                + "image data as an RGB PNG. Supports Z-projection "
-                                + "(mid-slice, max-intensity, sum, or adaptive), "
-                                + "multi-channel compositing with per-channel colors, "
-                                + "and automatic downsampling.")
+                        .description("Generate a quick RGB composite preview as "
+                                + "a PNG image. Composites all channels using "
+                                + "metadata colors and auto-projects through Z "
+                                + "(adaptive mode tries max-intensity, falls back "
+                                + "to mid-slice if too slow). Good for getting a "
+                                + "visual overview before deeper analysis.")
                         .inputSchema(getThumbnailSchema())
                         .annotations(new McpSchema.ToolAnnotations(
                                 null, true, false, true, false, false))
@@ -270,10 +304,14 @@ public class BioImageMcpServer {
         return SyncToolSpecification.builder()
                 .tool(McpSchema.Tool.builder()
                         .name("get_plane")
-                        .description("Extract a single 2D plane from a microscopy "
-                                + "image as a grayscale PNG. Useful for inspecting "
-                                + "individual channels, Z-slices, or timepoints "
-                                + "at full resolution.")
+                        .description("Extract a single 2D plane as a grayscale "
+                                + "PNG image. Specify channel, z_slice, and "
+                                + "timepoint to select which plane. Use this to "
+                                + "examine one channel at a time at full "
+                                + "resolution, or to compare specific Z-slices "
+                                + "or timepoints. Auto-contrast by default "
+                                + "(percentile stretch); set normalize=false "
+                                + "for absolute intensity mapping.")
                         .inputSchema(getPlaneSchema())
                         .annotations(new McpSchema.ToolAnnotations(
                                 null, true, false, true, false, false))
@@ -287,11 +325,14 @@ public class BioImageMcpServer {
         return SyncToolSpecification.builder()
                 .tool(McpSchema.Tool.builder()
                         .name("get_intensity_stats")
-                        .description("Compute per-channel intensity statistics: "
-                                + "min, max, mean, stddev, median, histogram, "
-                                + "saturation warnings, and bit-depth utilization. "
-                                + "Useful for quality assessment and understanding "
-                                + "the dynamic range of image data.")
+                        .description("Compute per-channel intensity statistics "
+                                + "as JSON: min, max, mean, stddev, median, "
+                                + "histogram, saturation warnings, and bit-depth "
+                                + "utilization. Use for quality assessment — "
+                                + "e.g. checking for saturated pixels, clipping, "
+                                + "or underexposure. Omit z_slice and timepoint "
+                                + "for adaptive mode that reads as much data as "
+                                + "the time budget allows.")
                         .inputSchema(getIntensityStatsSchema())
                         .annotations(new McpSchema.ToolAnnotations(
                                 null, true, false, true, false, false))
@@ -305,11 +346,13 @@ public class BioImageMcpServer {
         return SyncToolSpecification.builder()
                 .tool(McpSchema.Tool.builder()
                         .name("export_to_tiff")
-                        .description("Export microscopy data to OME-TIFF format "
-                                + "for use with standard imaging tools. Supports "
-                                + "subsetting by series, channels, Z-range, and "
-                                + "time-range. Reports metadata preservation "
-                                + "and any warnings about metadata loss.")
+                        .description("Convert microscopy data to OME-TIFF, the "
+                                + "open standard readable by FIJI, napari, and "
+                                + "most imaging software. Can subset by series, "
+                                + "channels, Z-range, and time-range. Reports "
+                                + "what metadata was preserved and warns about "
+                                + "any losses from format conversion. Does not "
+                                + "modify the original file.")
                         .inputSchema(exportToTiffSchema())
                         .annotations(new McpSchema.ToolAnnotations(
                                 null, false, false, false, false, false))

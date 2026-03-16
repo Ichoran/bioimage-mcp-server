@@ -10,7 +10,7 @@ import java.nio.file.Path;
  * implementations depend only on this interface — never on Bio-Formats
  * writer types directly.
  *
- * <h3>Lifecycle</h3>
+ * <p><b>Lifecycle</b></p>
  * <ol>
  *   <li>Create the writer instance.
  *   <li>Call {@link #open(Path, String, String)} with the output path,

@@ -34,3 +34,7 @@ out/
 
 # Downloaded test fixtures (large microscopy files)
 test/fixtures/
+
+
+# Notes from developer to themselves
+howto.*

@@ -1,4 +1,17 @@
-extends: JavaModule
+extends: [JavaModule, PublishModule]
+
+publishVersion: 0.1.0
+
+artifactName: bioimage_mcp_server
+pomSettings:
+  description: "MCP server giving LLM agents access to microscopy image data via Bio-Formats"
+  organization: "com.github.ichoran"
+  url: "https://github.com/ichoran/bioimage-mcp-server"
+  licenses:
+  - GPL-3.0-only
+  versionControl: "https://github.com/ichoran/bioimage-mcp-server"
+  developers:
+  - {id: "ichoran", name: "Rex Kerr", email: "rex@kerrrlab.org"}
 
 jvmVersion: 21
 

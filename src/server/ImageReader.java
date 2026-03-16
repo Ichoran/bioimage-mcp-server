@@ -10,7 +10,7 @@ import java.nio.file.Path;
  * Tool implementations depend only on this interface and the model
  * records in this package — never on Bio-Formats types directly.
  *
- * <h3>Lifecycle</h3>
+ * <p><b>Lifecycle</b></p>
  * <ol>
  *   <li>Create the reader instance.
  *   <li>Call {@link #open(Path)} to read and parse the file.
@@ -23,7 +23,7 @@ import java.nio.file.Path;
  * not an issue.  For future concurrent scenarios, callers should
  * use per-request reader instances.
  *
- * <h3>Pixel data byte order</h3>
+ * <p><b>Pixel data byte order</b></p>
  * Raw pixel bytes returned by {@link #readPlane} use the byte order
  * indicated by {@link #isLittleEndian}.  Callers must check this to
  * correctly interpret multi-byte pixel types (int16, float32, etc.).

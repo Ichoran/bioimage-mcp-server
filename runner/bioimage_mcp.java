@@ -17,7 +17,8 @@
 // paths the server may access.  See DESIGN.md §5 for details.
 // =================================================================
 
-//DEPS lab.kerrr.mcpbio:bioimage-mcp-server:0.1.0
+//REPOS mavencentral,ome=https://artifacts.openmicroscopy.org/artifactory/maven/
+//DEPS com.github.ichoran:bioimage_mcp_server:0.1.0
 
 import lab.kerrr.mcpbio.bioimageserver.BioImageMcpServer;
 
