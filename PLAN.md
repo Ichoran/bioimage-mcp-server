@@ -117,30 +117,49 @@ look up API details, pixel type constants, metadata accessors, etc.
   (single-plane and all-or-nothing respectively).
 
 
-## Phase 4: Bio-Formats reader implementation
+## Phase 4: Bio-Formats reader/writer implementation — partially done
 
-Now implement the real `formats/BioFormatsReader`.  At this point, tool
-logic is already tested against the fake — this phase is purely about
-verifying that Bio-Formats integration works correctly.
+- **`BioFormatsReader`** — `ImageReader` backed by Bio-Formats
+  `formats-gpl`.  Wraps `loci.formats.ImageReader` with
+  `OMEXMLService` for structured metadata extraction.  Maps
+  Bio-Formats pixel types, physical sizes (with unit conversion via
+  `ome.units`), channel info (wavelengths, colors, fluor),
+  instrument/objective metadata (with ID-based lookup through
+  instrument refs and objective settings), and acquisition dates to
+  our model records.  Detail-level filtering matches `FakeImageReader`
+  behavior.  OME-XML pass-through via `getOMEXML()` with original
+  metadata population.  `getOriginalMetadataCount()` aggregates
+  global + per-series flat metadata entries.  Defensive `safeGet()`
+  helper for Bio-Formats methods that sometimes throw instead of
+  returning null.
+- **`BioFormatsWriter`** — `ImageWriter` backed by Bio-Formats
+  `OMETiffWriter`.  Always uses BigTIFF.  Supports Uncompressed, LZW,
+  and zlib compression.  `getBytesWritten()` queries actual file size.
+- **`BioFormatsReaderTest`** — 28 round-trip integration tests.
+  Creates synthetic OME-TIFF files with `BioFormatsWriter`, reads
+  back with `BioFormatsReader`.  Covers: lifecycle (open/close, double
+  close, missing file); metadata (dimensions, format name, series
+  name, channel names, dimension order, all three detail levels,
+  multi-series summaries, physical pixel sizes); pixel data (uint8,
+  uint16, multi-channel, multi-Z/T); byte order; OME-XML retrieval;
+  LZW compression round-trip; pre-open state checks.
+- Note: OME-XML Channel elements require `SamplesPerPixel` attribute
+  for the writer — discovered during testing.
 
-- Implement `ImageReader` backed by Bio-Formats `formats-gpl`
-- Parse OME-XML into our model records
-- Test with real microscopy files (need a small test fixture set:
-  at minimum a multi-channel Z-stack TIFF and one proprietary format
-  like .czi or .nd2)
-- Verify that the fake reader's behavior matches real reader behavior
-  closely enough that tool tests remain meaningful
+### Still needed
 
-### Test fixtures
-
-We need a small set of real microscopy files for integration tests.
-These should be small (a few MB at most) and cover:
-- Multi-channel, multi-Z, multi-T
-- At least one format beyond TIFF (to verify Bio-Formats adds value)
-- Known metadata values we can assert against
-
-OME provides sample files; we may also generate synthetic OME-TIFFs
-with known properties.
+- Test with at least one proprietary format file (e.g. .czi or .nd2)
+  to verify Bio-Formats adds value beyond OME-TIFF.  OME provides
+  sample files; alternatively, any small proprietary microscopy file
+  with known metadata would work.
+- Verify that the fake reader's contract matches the real reader
+  closely enough that existing tool tests remain meaningful.  This
+  is partially validated by the round-trip tests passing, but a
+  side-by-side comparison on a real file would be more convincing.
+- Instrument/objective metadata round-trip test (requires OME-XML
+  with Instrument/Objective/ObjectiveSettings elements — not yet
+  tested because the writer needs well-formed instrument references
+  in the input XML).
 
 
 ## Phase 5: MCP server wiring
