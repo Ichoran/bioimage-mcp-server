@@ -37,6 +37,8 @@ claude mcp add bioimage-mcp \
   -- jbang https://github.com/ichoran/bioimage-mcp-server/blob/main/runner/bioimage_mcp.java
 ```
 
+Then future invocations of claude will have access.
+
 Or from a local clone or copy of the bioimage_mcp.java file (generally you
 should use the absolute path on your system, not just
 runner/bioimage_mcp.java):
@@ -45,6 +47,15 @@ runner/bioimage_mcp.java):
 claude mcp add bioimage-mcp \
   -- jbang runner/bioimage_mcp.java
 ```
+
+To remove,
+
+```sh
+claude mcp remove bioimage-mcp
+```
+
+and future invocations will no longer have access.
+
 
 ### To use with Claude Desktop
 
@@ -71,7 +82,8 @@ Claude examples as a guide.
 
 By default the server only accesses files under directories declared by
 the MCP client (client roots).  To grant access to additional paths, or
-to deny access to sensitive directories, edit the runner file:
+to deny access to sensitive directories, copy the runner file and edit
+the allow/deny lists:
 
 ```java
 BioImageMcpServer.builder()
@@ -82,6 +94,18 @@ BioImageMcpServer.builder()
     .run(args);
 ```
 
+This keeps your access rules inspectable and version-controllable in a
+single file.  Then point your MCP client at your edited copy instead of
+the original.
+
+For quick one-off use, you can also pass `--allow` and `--deny` flags
+on the command line:
+
+```sh
+jbang runner/bioimage_mcp.java --allow /data/microscopy --deny /tmp/secret
+```
+
+CLI flags are merged with any paths hardcoded in the runner file.
 Deny rules always win.  See DESIGN.md §5 for details.
 
 
@@ -120,7 +144,7 @@ line](https://mill-build.org/mill/cli/installation-ide.html).
 ### Commands
 
 ```sh
-mill test                # run all tests (365 unit + integration)
+mill test                # run all tests (367 unit + integration)
 mill assembly            # build fat jar
 mill run                 # run the server directly via Mill
 mill publishLocal        # publish to ~/.ivy2/local for local testing

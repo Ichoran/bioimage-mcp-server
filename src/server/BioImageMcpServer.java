@@ -16,6 +16,11 @@ import io.modelcontextprotocol.server.transport.StdioServerTransportProvider;
 import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
 
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
+
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
@@ -48,7 +53,7 @@ import java.util.function.Supplier;
 public class BioImageMcpServer {
 
     static final String NAME = "bioimage-mcp";
-    static final String VERSION = "0.1.0";
+    static final String VERSION = "0.1.1";
 
     /**
      * Server-level instructions shown to the LLM when it discovers
@@ -85,8 +90,9 @@ public class BioImageMcpServer {
             - Image tools return base64 PNG.  Text tools return JSON.
             """;
 
-    private final List<Path> denyList;
-    private final List<Path> allowList;
+    /** Deny/allow lists — immutable snapshots, replaced when CLI args are parsed. */
+    private List<Path> denyList;
+    private List<Path> allowList;
 
     /** Client roots, updated when the MCP client sends a roots notification. */
     private final CopyOnWriteArrayList<Path> clientRoots = new CopyOnWriteArrayList<>();
@@ -98,6 +104,13 @@ public class BioImageMcpServer {
         this.denyList = List.copyOf(denyList);
         this.allowList = List.copyOf(allowList);
         rebuildAccessControl();
+    }
+
+    /** Return a new immutable list with one path appended. */
+    private static List<Path> appendPath(List<Path> existing, String path) {
+        var merged = new ArrayList<>(existing);
+        merged.add(Path.of(path));
+        return List.copyOf(merged);
     }
 
     // ================================================================
@@ -145,11 +158,58 @@ public class BioImageMcpServer {
     // Server lifecycle
     // ================================================================
 
+    // ================================================================
+    // Command-line options
+    // ================================================================
+
+    private static Options cliOptions() {
+        var options = new Options();
+        options.addOption(Option.builder()
+                .longOpt("allow")
+                .hasArg()
+                .desc("Allow access to this path (may be repeated)")
+                .build());
+        options.addOption(Option.builder()
+                .longOpt("deny")
+                .hasArg()
+                .desc("Deny access to this path (may be repeated)")
+                .build());
+        return options;
+    }
+
     /**
      * Start the MCP server on stdio.  This method blocks until the
      * transport shuts down (typically when the client disconnects).
+     *
+     * <p>Supported command-line options:
+     * <ul>
+     *   <li>{@code --allow <path>} — grant access to a path (repeatable)</li>
+     *   <li>{@code --deny <path>} — block access to a path (repeatable)</li>
+     * </ul>
+     * CLI paths are merged with any paths configured via the builder.
      */
     public void run(String[] args) {
+        // Parse CLI args and merge with builder-configured paths.
+        try {
+            var cli = new DefaultParser().parse(cliOptions(), args);
+            var extraAllow = cli.getOptionValues("allow");
+            var extraDeny = cli.getOptionValues("deny");
+            if (extraAllow != null) {
+                for (var p : extraAllow) {
+                    allowList = appendPath(allowList, p);
+                }
+            }
+            if (extraDeny != null) {
+                for (var p : extraDeny) {
+                    denyList = appendPath(denyList, p);
+                }
+            }
+            rebuildAccessControl();
+        } catch (ParseException e) {
+            System.err.println("ERROR: " + e.getMessage());
+            System.exit(1);
+        }
+
         // Save stdout for MCP transport before any library can write to it.
         // Redirect System.out → System.err so Bio-Formats logging doesn't
         // corrupt the JSON-RPC protocol stream.
@@ -330,8 +390,11 @@ public class BioImageMcpServer {
                                 + "histogram, saturation warnings, and bit-depth "
                                 + "utilization. Use for quality assessment — "
                                 + "e.g. checking for saturated pixels, clipping, "
-                                + "or underexposure. Omit z_slice and timepoint "
-                                + "for adaptive mode that reads as much data as "
+                                + "or underexposure. Supports single values "
+                                + "(channel, z_slice, timepoint) or inclusive "
+                                + "ranges (channel_start/end, z_start/end, "
+                                + "t_start/end). Omit Z and T params for "
+                                + "adaptive mode that reads as much data as "
                                 + "the time budget allows.")
                         .inputSchema(getIntensityStatsSchema())
                         .annotations(new McpSchema.ToolAnnotations(
@@ -483,14 +546,56 @@ public class BioImageMcpServer {
                 "description", "Zero-based series index (default: 0)"));
         props.put("channel", Map.of(
                 "type", "integer",
-                "description", "Specific channel to analyze (default: all channels)"));
+                "description", "Specific channel to analyze (default: all channels). "
+                        + "Negative values count from the end (-1 = last). "
+                        + "Cannot be used together with channel_start/channel_end."));
+        props.put("channel_start", Map.of(
+                "type", "integer",
+                "description", "First channel, inclusive (default: 0). "
+                        + "Negative values count from the end (-1 = last). "
+                        + "Use with channel_end for a range. "
+                        + "Cannot be used together with channel."));
+        props.put("channel_end", Map.of(
+                "type", "integer",
+                "description", "Last channel, inclusive (default: -1, i.e. last). "
+                        + "Negative values count from the end (-1 = last). "
+                        + "Use with channel_start for a range. "
+                        + "Cannot be used together with channel."));
         props.put("z_slice", Map.of(
                 "type", "integer",
-                "description", "Specific Z-slice (default: adaptive across all Z)"));
+                "description", "Specific Z-slice (default: adaptive across all Z). "
+                        + "Negative values count from the end (-1 = last). "
+                        + "Cannot be used together with z_start/z_end."));
+        props.put("z_start", Map.of(
+                "type", "integer",
+                "description", "First Z-slice, inclusive (default: 0). "
+                        + "Negative values count from the end (-1 = last). "
+                        + "Use with z_end for a range. "
+                        + "Cannot be used together with z_slice."));
+        props.put("z_end", Map.of(
+                "type", "integer",
+                "description", "Last Z-slice, inclusive (default: -1, i.e. last). "
+                        + "Negative values count from the end (-1 = last). "
+                        + "Use with z_start for a range. "
+                        + "Cannot be used together with z_slice."));
         props.put("timepoint", Map.of(
                 "type", "integer",
                 "description", "Specific timepoint (default: adaptive across all T, "
-                        + "starting from timepoint 0)"));
+                        + "starting from timepoint 0). "
+                        + "Negative values count from the end (-1 = last). "
+                        + "Cannot be used together with t_start/t_end."));
+        props.put("t_start", Map.of(
+                "type", "integer",
+                "description", "First timepoint, inclusive (default: 0). "
+                        + "Negative values count from the end (-1 = last). "
+                        + "Use with t_end for a range. "
+                        + "Cannot be used together with timepoint."));
+        props.put("t_end", Map.of(
+                "type", "integer",
+                "description", "Last timepoint, inclusive (default: -1, i.e. last). "
+                        + "Negative values count from the end (-1 = last). "
+                        + "Use with t_start for a range. "
+                        + "Cannot be used together with timepoint."));
         props.put("histogram_bins", Map.of(
                 "type", "integer",
                 "description", "Number of histogram bins (default: 256)"));
@@ -658,15 +763,18 @@ public class BioImageMcpServer {
 
     private CallToolResult handleGetIntensityStats(Map<String, Object> args) {
         try {
-            // Map the simple MCP params to the tool's Range-based request.
-            // A single channel/z_slice/timepoint becomes a Range.of(n).
-            // Omitted → null (adaptive for z/t, all for channel).
-            Range channels = optInt(args, "channel") != null
-                    ? Range.of(optInt(args, "channel")) : null;
-            Range zRange = optInt(args, "z_slice") != null
-                    ? Range.of(optInt(args, "z_slice")) : null;
-            Range tRange = optInt(args, "timepoint") != null
-                    ? Range.of(optInt(args, "timepoint")) : null;
+            // Map the MCP params to the tool's Range-based request.
+            // Single-value params (channel, z_slice, timepoint) are shortcuts
+            // for a Range of one element.  Range params (channel_start/end,
+            // z_start/end, t_start/end) allow specifying inclusive ranges.
+            // Using both the single-value and range params for the same
+            // dimension is an error.
+            Range channels = parseRange(args,
+                    "channel", "channel_start", "channel_end");
+            Range zRange = parseRange(args,
+                    "z_slice", "z_start", "z_end");
+            Range tRange = parseRange(args,
+                    "timepoint", "t_start", "t_end");
 
             var request = GetIntensityStatsTool.Request.of(
                     requireString(args, "path"),
@@ -748,6 +856,40 @@ public class BioImageMcpServer {
     // ================================================================
     // Argument parsing helpers
     // ================================================================
+
+    /**
+     * Parse a dimension range from either a single-value parameter or
+     * a start/end pair.  Returns null if none are specified.
+     *
+     * @throws IllegalArgumentException if the single-value and range
+     *         params are both specified
+     */
+    private static Range parseRange(Map<String, Object> args,
+                                     String singleKey,
+                                     String startKey,
+                                     String endKey) {
+        var single = optInt(args, singleKey);
+        var start = optInt(args, startKey);
+        var end = optInt(args, endKey);
+
+        if (single != null && (start != null || end != null)) {
+            throw new IllegalArgumentException(
+                    "cannot specify both '" + singleKey + "' and '"
+                    + startKey + "'/'" + endKey + "'");
+        }
+
+        if (single != null) {
+            return Range.of(single);
+        }
+        if (start != null || end != null) {
+            // If only one bound is given, default to 0 for missing
+            // start and -1 (last element) for missing end.
+            int s = start != null ? start : 0;
+            int e = end != null ? end : -1;
+            return new Range(s, e);
+        }
+        return null;
+    }
 
     private static String requireString(Map<String, Object> args, String key) {
         var val = args.get(key);

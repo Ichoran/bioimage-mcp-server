@@ -281,3 +281,28 @@ look up API details, pixel type constants, metadata accessors, etc.
 - Tag release `v0.1.0`.
 - Verify the runner works with the published artifact:
   `jbang runner/bioimage-mcp.java` with no local build.
+
+
+## Phase 8: v0.1.1 improvements — done
+
+- **CLI path arguments** — `--allow <path>` and `--deny <path>` flags
+  parsed via Apache Commons CLI (`commons-cli:commons-cli:1.11.0`).
+  CLI paths are merged with builder-configured paths; the runner
+  forwards `args` to `run()`.  Primary recommendation remains editing
+  the runner file for inspectability; CLI flags are for one-off use.
+- **`get_intensity_stats` range parameters** — schema now exposes
+  `channel_start`/`channel_end`, `z_start`/`z_end`, `t_start`/`t_end`
+  alongside the existing single-value shortcuts (`channel`, `z_slice`,
+  `timepoint`).  Using both forms for the same dimension is an error.
+  Negative indices count from the end (`-1` = last, `-2` = second-to-last,
+  etc.).  `Range.resolve(size, name)` converts negative indices to
+  absolute positions and validates bounds; out-of-range after resolution
+  is still an error.  Omitting `_end` defaults to `-1` (last); omitting
+  `_start` defaults to `0`.
+- **Version bump** — `0.1.0` → `0.1.1` in build, server, and runner.
+- 367 tests passing (net +2 from expanded Range tests).
+
+### Still to do
+
+- Publish `0.1.1` to Maven Central.
+- Tag release `v0.1.1`.

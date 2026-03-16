@@ -49,18 +49,17 @@ public final class GetIntensityStatsTool {
      * @param start first index (inclusive, zero-based)
      * @param end   last index (inclusive, zero-based)
      */
+    /**
+     * An inclusive index range.  Indices may be negative to count from
+     * the end of the dimension: {@code -1} is the last element,
+     * {@code -2} is the second-to-last, etc.  Call {@link #resolve(int, String)}
+     * to convert to absolute non-negative indices against a known
+     * dimension size.
+     *
+     * @param start first index (inclusive; negative counts from end)
+     * @param end   last index (inclusive; negative counts from end)
+     */
     public record Range(int start, int end) {
-        public Range {
-            if (start < 0) {
-                throw new IllegalArgumentException(
-                        "range start must be non-negative, got " + start);
-            }
-            if (end < start) {
-                throw new IllegalArgumentException(
-                        "range end (" + end + ") must be >= start ("
-                        + start + ")");
-            }
-        }
 
         /** Convenience for a single index. */
         public static Range of(int index) { return new Range(index, index); }
@@ -68,6 +67,40 @@ public final class GetIntensityStatsTool {
         /** Convenience for a range. */
         public static Range of(int start, int end) {
             return new Range(start, end);
+        }
+
+        /**
+         * Resolve negative indices against a known dimension size and
+         * validate.  Returns a new {@code Range} with non-negative,
+         * in-bounds indices.
+         *
+         * @param size the dimension size (e.g. sizeZ)
+         * @param dimensionName for error messages (e.g. "Z-slice")
+         * @throws IllegalArgumentException if the resolved range is
+         *         out of bounds or start &gt; end after resolution
+         */
+        public Range resolve(int size, String dimensionName) {
+            int s = start < 0 ? size + start : start;
+            int e = end < 0 ? size + end : end;
+            if (s < 0 || s >= size) {
+                throw new IllegalArgumentException(
+                        dimensionName + " range start " + start
+                        + " resolves to " + s + ", out of range for "
+                        + size + " " + dimensionName + "(s)");
+            }
+            if (e < 0 || e >= size) {
+                throw new IllegalArgumentException(
+                        dimensionName + " range end " + end
+                        + " resolves to " + e + ", out of range for "
+                        + size + " " + dimensionName + "(s)");
+            }
+            if (s > e) {
+                throw new IllegalArgumentException(
+                        dimensionName + " range start " + start
+                        + " (resolved: " + s + ") is greater than end "
+                        + end + " (resolved: " + e + ")");
+            }
+            return new Range(s, e);
         }
 
         /** Number of indices in this range. */
@@ -502,33 +535,15 @@ public final class GetIntensityStatsTool {
         if (requested == null) {
             return new Range(0, si.sizeC() - 1);
         }
-        if (requested.end() >= si.sizeC()) {
-            throw new IllegalArgumentException(
-                    "channel range end " + requested.end()
-                    + " out of range, series has " + si.sizeC()
-                    + " channel(s)");
-        }
-        return requested;
+        return requested.resolve(si.sizeC(), "channel");
     }
 
     private static Range validateZRange(Range requested, SeriesInfo si) {
-        if (requested.end() >= si.sizeZ()) {
-            throw new IllegalArgumentException(
-                    "z range end " + requested.end()
-                    + " out of range, series has " + si.sizeZ()
-                    + " Z-slice(s)");
-        }
-        return requested;
+        return requested.resolve(si.sizeZ(), "Z-slice");
     }
 
     private static Range validateTRange(Range requested, SeriesInfo si) {
-        if (requested.end() >= si.sizeT()) {
-            throw new IllegalArgumentException(
-                    "timepoint range end " + requested.end()
-                    + " out of range, series has " + si.sizeT()
-                    + " timepoint(s)");
-        }
-        return requested;
+        return requested.resolve(si.sizeT(), "timepoint");
     }
 
     // ---- Subsampling ----

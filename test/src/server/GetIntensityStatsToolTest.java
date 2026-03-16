@@ -475,15 +475,33 @@ class GetIntensityStatsToolTest {
     }
 
     @Test
-    void negativeRangeStartRejected() {
-        assertThrows(IllegalArgumentException.class,
-                () -> Range.of(-1));
+    void negativeIndexResolvesToEnd() {
+        var r = Range.of(-1);
+        var resolved = r.resolve(10, "test");
+        assertEquals(9, resolved.start());
+        assertEquals(9, resolved.end());
     }
 
     @Test
-    void invertedRangeRejected() {
+    void negativeRangeResolvesFromEnd() {
+        var r = Range.of(-5, -1);
+        var resolved = r.resolve(10, "test");
+        assertEquals(5, resolved.start());
+        assertEquals(9, resolved.end());
+    }
+
+    @Test
+    void negativeStartOutOfBoundsRejected() {
+        var r = Range.of(-11);
         assertThrows(IllegalArgumentException.class,
-                () -> Range.of(5, 2));
+                () -> r.resolve(10, "test"));
+    }
+
+    @Test
+    void invertedRangeRejectedAtResolution() {
+        var r = Range.of(5, 2);
+        assertThrows(IllegalArgumentException.class,
+                () -> r.resolve(10, "test"));
     }
 
     // ================================================================

@@ -18,7 +18,7 @@
 // =================================================================
 
 //REPOS mavencentral,ome=https://artifacts.openmicroscopy.org/artifactory/maven/
-//DEPS com.github.ichoran:bioimage_mcp_server:0.1.0
+//DEPS com.github.ichoran:bioimage_mcp_server:0.1.1
 //DEPS com.fasterxml.jackson.core:jackson-annotations:2.20
 
 import lab.kerrr.mcpbio.bioimageserver.BioImageMcpServer;
