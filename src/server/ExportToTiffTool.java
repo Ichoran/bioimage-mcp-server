@@ -226,20 +226,39 @@ public final class ExportToTiffTool {
     /**
      * Execute the export_to_tiff tool.
      *
-     * @param request        the export parameters
-     * @param pathValidator   validates input and output paths
-     * @param readerFactory   creates a new (unopened) reader
-     * @param writerFactory   creates a new (unopened) writer
-     * @return a structured result or a failure
+     * <p>Convenience overload that uses a single validator for both
+     * input and output paths.
      */
     public static ToolResult<ExportResult> execute(
             Request request,
             PathValidator pathValidator,
             Supplier<ImageReader> readerFactory,
             Supplier<ImageWriter> writerFactory) {
+        return execute(request, pathValidator, pathValidator,
+                readerFactory, writerFactory);
+    }
+
+    /**
+     * Execute the export_to_tiff tool.
+     *
+     * @param request             the export parameters
+     * @param inputPathValidator   validates the input (source) path
+     * @param outputPathValidator  validates the output (destination) path;
+     *                            may differ from the input validator because
+     *                            the output file does not yet exist
+     * @param readerFactory       creates a new (unopened) reader
+     * @param writerFactory       creates a new (unopened) writer
+     * @return a structured result or a failure
+     */
+    public static ToolResult<ExportResult> execute(
+            Request request,
+            PathValidator inputPathValidator,
+            PathValidator outputPathValidator,
+            Supplier<ImageReader> readerFactory,
+            Supplier<ImageWriter> writerFactory) {
 
         // 1. Validate input path
-        var inputAccess = pathValidator.check(request.inputPath());
+        var inputAccess = inputPathValidator.check(request.inputPath());
         if (inputAccess instanceof AccessResult.Denied denied) {
             return ToolResult.accessDenied(
                     "input: " + denied.reason());
@@ -247,7 +266,7 @@ public final class ExportToTiffTool {
         var inputPath = ((AccessResult.Allowed) inputAccess).canonicalPath();
 
         // 2. Validate output path
-        var outputAccess = pathValidator.check(request.outputPath());
+        var outputAccess = outputPathValidator.check(request.outputPath());
         if (outputAccess instanceof AccessResult.Denied denied) {
             return ToolResult.accessDenied(
                     "output: " + denied.reason());

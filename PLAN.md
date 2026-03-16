@@ -170,26 +170,57 @@ look up API details, pixel type constants, metadata accessors, etc.
   real implementation.
 
 
-## Phase 5: MCP server wiring
+## Phase 5: MCP server wiring — done
 
-Connect the tested tools to the MCP SDK transport layer.
+- **`BioImageMcpServer`** — complete rewrite.  Builder pattern for
+  allow/deny path configuration (as envisioned in DESIGN.md §5.3).
+  `run()` method creates `StdioServerTransportProvider` with captured
+  stdout (System.out redirected to stderr to prevent Bio-Formats
+  logging from corrupting the JSON-RPC stream).  Registers all 5 tools
+  via `McpServer.sync(transport)` builder.  Client roots handled via
+  `rootsChangeHandler` callback — extracts `file://` URIs from
+  `McpSchema.Root` and rebuilds `PathAccessControl` dynamically.
+- **Tool JSON schemas** — `McpSchema.JsonSchema` for each tool with
+  descriptive parameter docs, enum constraints, and sensible defaults.
+  Flat snake_case parameters for LLM-friendliness.
+- **Argument parsing** — `Map<String, Object>` → tool `Request` records
+  with type-safe helpers: `requireString`, `optInt`, `optLong`,
+  `optBool`, `optDuration`, `optIntArray`, `optEnum`.
+- **Result mapping** — `ToolResult.Success` → `CallToolResult` with
+  appropriate content types; `ToolResult.Failure` → `isError(true)`.
+  Image tools (`get_plane`, `get_thumbnail`) return `ImageContent`
+  (base64 PNG) + optional `TextContent` metadata.  Text tools
+  (`inspect_image`, `get_intensity_stats`, `export_to_tiff`) return
+  `TextContent` with JSON.
+- **`JsonUtil`** — domain record serialization via Jackson 3.x
+  (already on classpath from MCP SDK, `tools.jackson.databind`
+  package — no conflict with Jackson 2.x from Bio-Formats).
+  Each domain type has a `toMap` method producing
+  `Map<String, Object>` with clean LLM-friendly keys; Jackson
+  `ObjectWriter` handles final JSON serialization with indentation.
+  12 tests covering all result types, null omission, escaping.
+- **Output path validation** — `ExportToTiffTool.execute` now accepts
+  separate `PathValidator` instances for input and output paths (with
+  a convenience overload for the single-validator case).  The server
+  uses an `outputPathValidator()` that checks the parent directory
+  rather than the file itself, since the output file doesn't exist yet.
+- **Tool annotations** — all read-only tools marked with
+  `readOnlyHint: true`; `export_to_tiff` creates files so
+  `readOnlyHint: false`.
+- 12 new `JsonUtilTest` tests + 13 new `BioImageMcpServerTest` tests
+  (builder, defaults, end-to-end tool execution with `FakeImageReader`,
+  error handling).  Total: 365 tests passing.
 
-- Register each tool with `McpSyncServer` (or async variant)
-- JSON schema generation for tool input parameters
-- Map `CallToolRequest` → tool method calls → `CallToolResult`
-- Wire `PathAccessControl` checks into every tool that takes a path
-- Wire `ProgressNotification` into long-running tools
-- Handle `listRoots` from the client to populate client roots
+### Not yet done (deferred)
 
-This should be mostly mechanical plumbing.  If the tools are well-tested
-pure functions, surprises here are limited to serialization edge cases
-and transport behavior.
-
-### Integration smoke tests
-
-Stand up a real `StdioServerTransportProvider`, send JSON-RPC messages
-to stdin, verify responses on stdout.  This catches serialization issues
-and protocol misunderstandings without needing a full MCP client.
+- **Progress notifications** — requires threading integration with
+  `CancellableTask` to send `ProgressNotification` during long
+  operations.  The `McpSyncServerExchange.progressNotification()`
+  method is available but not yet wired.
+- **Integration smoke tests** — stand up a real
+  `StdioServerTransportProvider`, send JSON-RPC messages to stdin,
+  verify responses on stdout.  Deferred to Phase 6 where we test
+  with actual MCP clients.
 
 
 ## Phase 6: Runner and end-to-end
@@ -200,6 +231,8 @@ and protocol misunderstandings without needing a full MCP client.
 - Verify image display (base64 PNG inline rendering)
 - Verify progress notifications appear in the client
 - Verify error messages are clear and actionable
+- Integration smoke test: send JSON-RPC messages via stdin, verify
+  responses on stdout
 
 This is where we discover the gap between "what we thought the transport
 would do" and "what it actually does."  By this point, the gap should be
