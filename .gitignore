@@ -31,3 +31,6 @@ replay_pid*
 
 # mill build tool
 out/
+
+# Downloaded test fixtures (large microscopy files)
+test/fixtures/

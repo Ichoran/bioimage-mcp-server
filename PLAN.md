@@ -117,7 +117,7 @@ look up API details, pixel type constants, metadata accessors, etc.
   (single-plane and all-or-nothing respectively).
 
 
-## Phase 4: Bio-Formats reader/writer implementation — partially done
+## Phase 4: Bio-Formats reader/writer implementation — done
 
 - **`BioFormatsReader`** — `ImageReader` backed by Bio-Formats
   `formats-gpl`.  Wraps `loci.formats.ImageReader` with
@@ -143,23 +143,31 @@ look up API details, pixel type constants, metadata accessors, etc.
   multi-series summaries, physical pixel sizes); pixel data (uint8,
   uint16, multi-channel, multi-Z/T); byte order; OME-XML retrieval;
   LZW compression round-trip; pre-open state checks.
+- **`BioFormatsProprietaryTest`** — 10 tests against a real Zeiss CZI
+  file downloaded from the OME sample data repository (IDR collection).
+  `TestFixtures` helper auto-downloads and caches fixtures in
+  `test/fixtures/` (gitignored); tests skip via `assumeTrue` if the
+  download fails (no network, server unavailable).  Covers: open,
+  format name detection, positive dimensions, pixel data readability
+  (correct byte count), standard metadata (channels, dimension order),
+  full vs standard extra metadata, OME-XML generation, original
+  metadata count, all-series summaries, byte order.  Confirms
+  Bio-Formats reads a real proprietary format end-to-end through our
+  abstraction layer.
 - Note: OME-XML Channel elements require `SamplesPerPixel` attribute
   for the writer — discovered during testing.
 
-### Still needed
+### Possible future improvements (not blocking)
 
-- Test with at least one proprietary format file (e.g. .czi or .nd2)
-  to verify Bio-Formats adds value beyond OME-TIFF.  OME provides
-  sample files; alternatively, any small proprietary microscopy file
-  with known metadata would work.
-- Verify that the fake reader's contract matches the real reader
-  closely enough that existing tool tests remain meaningful.  This
-  is partially validated by the round-trip tests passing, but a
-  side-by-side comparison on a real file would be more convincing.
+- Additional proprietary format fixtures (ND2, LIF, etc.) via the
+  same `TestFixtures` mechanism — just add more `FixtureDef` entries.
 - Instrument/objective metadata round-trip test (requires OME-XML
   with Instrument/Objective/ObjectiveSettings elements — not yet
   tested because the writer needs well-formed instrument references
   in the input XML).
+- Side-by-side comparison of `FakeImageReader` vs `BioFormatsReader`
+  on the same file to verify the fake's contract closely matches the
+  real implementation.
 
 
 ## Phase 5: MCP server wiring
