@@ -37,7 +37,9 @@ claude mcp add bioimage-mcp \
   -- jbang https://github.com/ichoran/bioimage-mcp-server/blob/main/runner/bioimage_mcp.java
 ```
 
-Or from a local clone (adjust the path as needed):
+Or from a local clone or copy of the bioimage_mcp.java file (generally you
+should use the absolute path on your system, not just
+runner/bioimage_mcp.java):
 
 ```sh
 claude mcp add bioimage-mcp \
@@ -46,7 +48,8 @@ claude mcp add bioimage-mcp \
 
 ### To use with Claude Desktop
 
-Add to your Claude Desktop configuration (`claude_desktop_config.json`):
+Add to your Claude Desktop configuration (`claude_desktop_config.json`),
+with the same caveats about paths:
 
 ```json
 {
