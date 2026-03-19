@@ -1,6 +1,5 @@
 package lab.kerrr.mcpbio.bioimageserver;
 
-import lab.kerrr.mcpbio.bioimageserver.CancellableTask.Result;
 import lab.kerrr.mcpbio.bioimageserver.ImageMetadata.DetailLevel;
 import lab.kerrr.mcpbio.bioimageserver.PathAccessControl.AccessResult;
 
@@ -307,7 +306,7 @@ public final class GetIntensityStatsTool {
             }
         });
 
-        return unwrap(result);
+        return ToolResult.unwrap(result);
     }
 
     // ================================================================
@@ -585,34 +584,4 @@ public final class GetIntensityStatsTool {
         return result;
     }
 
-    // ---- CancellableTask.Result → ToolResult conversion ----
-
-    private static <T> ToolResult<T> unwrap(Result<T> result) {
-        return switch (result) {
-            case Result.Completed<T> c -> ToolResult.success(c.value());
-            case Result.Failed<T> f -> convertError(f.error());
-            case Result.TimedOut<T> t -> ToolResult.timeout(
-                    "Operation timed out after " + t.elapsed().toMillis()
-                    + " ms (interrupted " + t.interruptsSent() + " time(s),"
-                    + " thread "
-                    + (t.threadStillAlive() ? "still alive" : "terminated")
-                    + ")");
-        };
-    }
-
-    private static <T> ToolResult<T> convertError(Throwable error) {
-        if (error instanceof InterruptedException) {
-            return ToolResult.timeout(
-                    "Operation was interrupted (likely timed out)");
-        }
-        if (error instanceof IllegalArgumentException) {
-            return ToolResult.invalidArgument(error.getMessage());
-        }
-        if (error instanceof IOException) {
-            return ToolResult.ioError(error.getMessage(), error);
-        }
-        return ToolResult.ioError(
-                error.getClass().getSimpleName() + ": " + error.getMessage(),
-                error);
-    }
 }

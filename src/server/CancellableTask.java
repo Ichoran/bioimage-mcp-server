@@ -213,8 +213,9 @@ public record CancellableTask(
 
         long startNanos = System.nanoTime();
 
-        var thread = Thread.ofVirtual()
+        var thread = Thread.ofPlatform()
                 .name("cancellable-task")
+                .daemon(true)
                 .start(() -> {
                     try {
                         T value = work.call();

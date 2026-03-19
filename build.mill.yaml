@@ -32,3 +32,4 @@ mvnDeps:
 - org.apache.commons:commons-math3:3.6.1
 - org.apache.commons:commons-text:1.13.0
 - commons-cli:commons-cli:1.11.0
+- org.slf4j:slf4j-simple:2.0.16
