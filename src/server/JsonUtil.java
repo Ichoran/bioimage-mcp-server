@@ -42,6 +42,33 @@ final class JsonUtil {
         }
     }
 
+    /**
+     * Parse a JSON object into a flat {@code Map<String, Object>} suitable
+     * for the argument-parsing helpers in {@link BioImageService}.  An
+     * empty or blank input is treated as an empty object (no arguments).
+     *
+     * @throws IllegalArgumentException if the input is not a JSON object
+     */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> parseObject(String json) {
+        if (json == null || json.isBlank()) {
+            return new LinkedHashMap<>();
+        }
+        Object parsed;
+        try {
+            parsed = MAPPER.readValue(json, Object.class);
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                    "request body is not valid JSON: " + e.getMessage());
+        }
+        if (parsed instanceof Map<?, ?> map) {
+            return (Map<String, Object>) map;
+        }
+        throw new IllegalArgumentException(
+                "request body must be a JSON object, got: "
+                + (parsed == null ? "null" : parsed.getClass().getSimpleName()));
+    }
+
     // ================================================================
     // ImageMetadata
     // ================================================================
@@ -219,6 +246,30 @@ final class JsonUtil {
     static Map<String, Object> toMap(ThumbnailResult r) {
         var map = new LinkedHashMap<String, Object>();
         map.put("projection_used", r.projectionUsed().name().toLowerCase());
+        return map;
+    }
+
+    // ================================================================
+    // DepositDescriptor
+    // ================================================================
+
+    static Map<String, Object> toMap(DepositDescriptor d) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("offset", d.offset());
+        map.put("total_bytes", d.totalBytes());
+        map.put("plane_bytes", d.planeBytes());
+        map.put("pixel_type", d.pixelType());
+        map.put("bytes_per_sample", d.bytesPerSample());
+        map.put("signed", d.signed());
+        map.put("little_endian", d.littleEndian());
+        map.put("axis_order", DepositDescriptor.AXIS_ORDER);
+        var shape = new LinkedHashMap<String, Object>();
+        shape.put("x", d.sizeX());
+        shape.put("y", d.sizeY());
+        shape.put("c", d.sizeC());
+        shape.put("z", d.sizeZ());
+        shape.put("t", d.sizeT());
+        map.put("shape", shape);
         return map;
     }
 

@@ -621,3 +621,137 @@ These should be resolved during implementation:
 5. **Mill vs Gradle final decision.** Evaluate Mill 1.1's Java support
    concretely with the actual dependency set (Bio-Formats has complex transitive
    dependencies).  Fall back to Gradle if issues arise.
+
+
+## 9. Shared-Memory Deposit Protocol
+
+The microservice transport (`BioImageSocketService`) lets a co-located
+client receive **raw pixel volumes** with no copy through a socket body and
+no PNG/JSON re-encoding.  It is the data-plane complement to the MCP and
+HTTP adapters, built on the same protocol-neutral `BioImageService`
+(`deposit` operation, `DepositDescriptor`, `PixelSink`).
+
+### 9.1 Two planes
+
+- **Control plane** — a persistent **Unix-domain socket** carrying
+  newline-delimited JSON (one object per line, each direction).
+  `UnixDomainSocketAddress` works on Linux and Windows 10+; loopback TCP is
+  the fallback if a platform lacks UDS.
+- **Data plane** — a **client-owned region**: a file the client creates,
+  sizes, maps (`mmap`) into its own address space, and later unlinks.  On
+  `tmpfs`/`/dev/shm` its pages are RAM, so the server's positional writes
+  are visible to the client's mapping with no disk round-trip.  Pixel bytes
+  never travel over the socket.
+
+The server attaches to the region only for the duration of one deposit
+(opens the file, writes, flushes, closes) and **never unlinks it** —
+lifecycle management is entirely the client's.
+
+### 9.2 Ownership and lifecycle decisions
+
+- **Client owns the region.** It creates and pre-sizes the file and passes a
+  `capacity_bytes`.  The server computes `required = T·Z·C·Y·X·bytesPerSample`
+  and **refuses** (`INVALID_ARGUMENT`, writing nothing) if
+  `required > capacity_bytes` — no false confidence that a short buffer
+  "worked".  The server maps exactly `required` and never grows the region.
+- **Reply means ready.** The server responds `filled` only after every byte
+  is written and flushed; no `filled` ⇒ the region is incomplete and the
+  client must discard it.  There is no separate ready flag.
+- **Drop on disconnect.** The connection thread only reads, so a client
+  close is observed promptly as EOF; an in-flight deposit is cancelled
+  (interrupt-with-backoff via `CancellableTask.Handle`), the `PixelSink` is
+  always closed, and no reply is sent.
+- **Native endianness.** Bytes are written in the source file's order;
+  `little_endian` in the descriptor reports which (never byte-swapped).
+- **Access control.** Both the source image path and the target region path
+  pass the same deny > allow > client-roots check as every other operation,
+  so a crafted `target.path` cannot induce the server to write outside
+  permitted directories.  Clients typically `--allow /dev/shm`.
+
+### 9.3 Buffer layout
+
+Pixels are written in **C-order with X fastest and T slowest**; axis order
+is `["t","z","c","y","x"]`.  The element at `(t,z,c,y,x)` — indices relative
+to the *deposited selection*, not the source file — lives at byte offset
+
+```
+((((t*sizeZ + z)*sizeC + c)*sizeY + y)*sizeX + x) * bytesPerSample
+```
+
+Each `readPlane` result is one `(t,z,c)` plane of `sizeY*sizeX` samples in
+row-major order, copied verbatim at `planeIndex * planeBytes`.  A "volume"
+is simply a deposit with a full Z-range and a single channel/timepoint;
+there is no native multi-plane read in Bio-Formats, so the server loops
+planes and composes the contiguous buffer itself.
+
+### 9.4 Messages
+
+On connect the server sends a hello:
+
+```json
+{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.1.1"}
+```
+
+**Deposit** (one in flight per connection, sequential; `id` is client-chosen
+and echoed):
+
+```json
+{"type":"deposit","id":"c1",
+ "path":"/data/stack.czi","series":0,
+ "channel":0,                      // or channel_start/channel_end; default all
+ "z_start":0,"z_end":-1,           // default all Z;  -1 = last
+ "t_start":0,"t_end":0,            // default all T
+ "target":{"kind":"file","path":"/dev/shm/bio-7f3a","capacity_bytes":43352064},
+ "timeout_seconds":60}
+```
+
+Set `"dry_run":true` (and omit `target`) to get the descriptor — with
+`total_bytes` — *without* writing, so the client can size the region first.
+
+**Filled** (the success reply; carries the full `DepositDescriptor`):
+
+```json
+{"type":"filled","id":"c1",
+ "offset":0,"total_bytes":43352064,"plane_bytes":688128,
+ "pixel_type":"uint16","bytes_per_sample":2,"signed":false,"little_endian":true,
+ "axis_order":["t","z","c","y","x"],
+ "shape":{"x":672,"y":512,"c":1,"z":21,"t":1}}
+```
+
+**Error** (`error_kind` is `access_denied` | `invalid_argument` | `timeout`
+| `io_error` for operation failures):
+
+```json
+{"type":"error","id":"c1","error_kind":"invalid_argument","message":"..."}
+```
+
+**Shutdown** — a client may ask the server to exit, honored **only when the
+requester is the sole connected client** so one client can never tear the
+server out from under others:
+
+```json
+{"type":"shutdown","id":"s1"}
+→ {"type":"shutdown_ok","id":"s1"}          // then the server exits
+→ {"type":"error","id":"s1","error_kind":"shutdown_refused",
+   "message":"refusing shutdown: N other client(s) connected"}
+```
+
+On `shutdown_ok` the server closes the listener, removes the socket file
+(via its shutdown hook), and exits; the client observes the reply followed
+by EOF.  The server flushes `shutdown_ok` and then exits without waiting to
+confirm delivery — a robust client must already tolerate the server
+vanishing at any moment (crash, OOM, host reboot), so "I requested shutdown
+and the final bytes didn't arrive" is just one case of that general
+responsibility, not a special one worth a delivery handshake.
+
+### 9.5 Future sink kinds
+
+`target.kind` is a tagged union; `"file"` (`MappedFileSink`) is the only v1
+implementation.  A true POSIX `shm_open` object (`"posix_shm"`) or a Windows
+named mapping (`"win_named"`) can be added as new `PixelSink`s behind the
+same envelope — via the Foreign Function & Memory API — without any change
+to the wire protocol or the deposit logic.  The file-backed path is
+preferred until profiling shows the `tmpfs` indirection matters, because it
+is one cross-platform code path with no FFM and no 2 GB
+`MappedByteBuffer` limit (positional `FileChannel` writes take `long`
+offsets).

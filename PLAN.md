@@ -7,6 +7,105 @@ identified that deserves its own step.  Re-order when priorities change.
 `../../java/bioformats` (i.e. `~/Code/java/bioformats`).  Use it to
 look up API details, pixel type constants, metadata accessors, etc.
 
+## Phase 9: Transport separation (MCP ↔ microservice) — done
+
+- **`BioImageService`** — protocol-neutral core extracted from
+  `BioImageMcpServer`.  Owns the file-access policy (deny/allow/client
+  roots), the reader/writer factories, the shared `--allow`/`--deny`
+  CLI options, and the five image operations.  Each operation takes a
+  flat snake_case `Map<String,Object>` (the lowest common denominator
+  any transport can produce) and returns a `ToolResult`, converting
+  argument-parse errors into `INVALID_ARGUMENT` failures instead of
+  throwing.  The arg-parsing helpers (`parseRange`, `optInt`,
+  `optEnum`, …) moved here so every adapter shares them.  Thread-safe:
+  each call gets its own reader; policy held in `volatile` fields.
+- **`BioImageMcpServer`** — now a thin MCP/stdio adapter over
+  `BioImageService`.  Keeps only transport glue: JSON schemas, tool
+  specs, the stdio transport, the client-roots → `setClientRoots`
+  bridge, and `ToolResult → CallToolResult` mapping.  Public surface
+  unchanged (`builder().allow()/.deny().build().run()`, `NAME`,
+  `VERSION`) so the existing runner and tests are untouched.
+- **`BioImageHttpService`** — sibling adapter proving separability.
+  Plain `com.sun.net.httpserver` (no new deps).  `POST /<tool>` with
+  the same JSON arg body; JSON tools return `application/json`, image
+  tools return raw `image/png` bytes (thumbnail's projection in an
+  `X-Projection-Used` header).  `ToolResult.Failure` → HTTP status by
+  kind (403/400/504/502); malformed body → 400; wrong method → 405.
+  Virtual-thread-per-task executor; each request gets its own reader.
+  `JsonUtil.parseObject` added for request-body parsing.
+- **`runner/bioimage_http.java`** — JBang wrapper mirroring
+  `bioimage_mcp.java`.  Launching the microservice is just running a
+  different wrapper file.  (Local dev runs the class from the fat jar
+  directly until a release containing it is published, since the
+  published `//DEPS` artifact would otherwise shadow new classes.)
+- **Validated:** `mill test` 120 classes green; MCP smoke test 9/9
+  (also fixed a stale `0.1.0` version assertion → `0.1.1`); HTTP
+  adapter exercised live against the real Zeiss CZI fixture —
+  inspect/plane/thumbnail and every error path (access-denied,
+  invalid-arg, malformed-JSON, wrong-method, missing-file) confirmed.
+
+### Possible future improvements (not blocking)
+
+- **Concurrency hardening** — readers are created per-call (safe), but
+  a multi-client microservice may want a bounded reader pool to cap
+  open files / memory under load.
+
+
+## Phase 10: Shared-memory deposit — done
+
+Full protocol spec in DESIGN.md §9.
+
+- **`BioImageService.deposit`** — new protocol-neutral operation that
+  reads a selection (channel/Z/T ranges over a series) and writes the
+  raw native pixel bytes contiguously into a client-owned region.  No
+  normalization, no PNG — one layer below the display tools, looping
+  `ImageReader.readPlane` and composing the volume itself (Bio-Formats
+  has no multi-plane read).  Buffer is C-order, axis order
+  `[t,z,c,y,x]`, X fastest.  Enforces `required ≤ capacity_bytes`
+  (writes nothing on a short buffer), validates both source and target
+  paths through the existing access policy, and never unlinks the
+  region.  Returns a self-describing `DepositDescriptor`.  A
+  `dry_run` flag returns the descriptor (with `total_bytes`) without
+  writing, so the client can size the region first.  Runs under a
+  `CancellableTask` so it honors both the timeout and a transport-
+  driven `DepositHandle.cancel()`; the `PixelSink` is always closed.
+- **`PixelSink` / `MappedFileSink`** — sink abstraction; the v1
+  `file` implementation writes via positional `FileChannel.write`
+  (long offsets, no 2 GB `MappedByteBuffer` limit, no FFM).  On
+  `tmpfs`/`/dev/shm` the client's `mmap` sees the writes without a
+  disk round-trip.  `posix_shm`/`win_named` kinds can slot in behind
+  the same tagged `target` later.
+- **`BioImageSocketService`** — third sibling adapter (UDS, NDJSON
+  control plane).  Connection thread reads only (prompt EOF →
+  cancel); deposit replies written from a worker so a disconnect is
+  always noticed.  Sequential one-deposit-per-connection; connections
+  reused.  Added a **`shutdown`** control message honored only when the
+  requester is the sole connected client (tracked via an
+  `AtomicInteger`), so one client can't tear the server out from under
+  others; on `shutdown_ok` it closes the listener, removes the socket
+  file, and exits.  `runner/bioimage_socket.java` wrapper.
+- **Validated:** 5 `DepositTest` unit tests (byte-exact layout against
+  `FakeImageReader`'s deterministic formula, multi-channel axis order,
+  dry-run, capacity-too-small writes nothing, source-outside-allow
+  denied) — 362 tests green.  Live UDS exercise against the real Zeiss
+  CZI: hello, dry-run sizing, real fill into `/dev/shm` (688 128 bytes,
+  data verified non-zero), capacity-rejection, connection reuse, abrupt
+  mid-deposit disconnect (server survived and kept serving), shutdown
+  refusal with 2 clients + clean self-shutdown as sole client (process
+  exited, socket file removed — no kill needed).
+
+### Possible future improvements (not blocking)
+
+- **True shared memory fast-path** — POSIX `shm_open` / Windows named
+  mapping via FFM, if `tmpfs` file indirection ever shows up in
+  profiling.  Same protocol, new `PixelSink`.
+- **Pipelined deposits** — the `id` field is already echoed, so
+  relaxing the one-in-flight-per-connection rule is forward-compatible
+  if a client wants concurrent fills into distinct regions.
+- **Expose `deposit` on the HTTP adapter** — a `dry_run` over HTTP is a
+  cheap way to size regions for clients that prefer request/response.
+
+
 ## Already done
 
 - Project skeleton, Mill build, JUnit 5 tests
