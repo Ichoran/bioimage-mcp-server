@@ -15,8 +15,11 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Supplier;
 
@@ -68,6 +71,15 @@ public final class BioImageService {
 
     private final Supplier<ImageReader> readerFactory;
     private final Supplier<ImageWriter> writerFactory;
+
+    /**
+     * Open sessions, keyed by handle.  Populated by {@link #openSession} and
+     * drained by {@link #closeSession} (driven by a session-capable transport
+     * when the client closes a handle or the connection drops).  Stateless
+     * transports (MCP/stdio, HTTP) never touch this map.
+     */
+    private final ConcurrentHashMap<String, ImageSession> sessions =
+            new ConcurrentHashMap<>();
 
     private BioImageService(List<Path> denyList, List<Path> allowList,
                             Supplier<ImageReader> readerFactory,
@@ -245,81 +257,233 @@ public final class BioImageService {
     }
 
     // ================================================================
-    // Operations — each takes a flat snake_case argument map and returns
-    // a structured ToolResult.  Argument-parsing problems are surfaced as
-    // INVALID_ARGUMENT failures rather than thrown.
+    // Sessions (stateful, kept-open readers)
+    //
+    // A session-capable transport (UDS socket, gRPC) calls openSession to keep
+    // a reader open across many operations, then routes subsequent calls by
+    // `handle`.  The transport owns each session's lifetime and must call
+    // closeSession when the client closes the handle or the connection drops.
+    // See ImageSession / HeldImageReader and the withSession seam below.
     // ================================================================
 
-    public ToolResult<ImageMetadata> inspectImage(Map<String, Object> args) {
+    /** Default wall-clock budget for opening a session (parsing metadata). */
+    private static final Duration DEFAULT_OPEN_TIMEOUT = Duration.ofSeconds(30);
+
+    /**
+     * Open an image and keep its reader open, returning a {@link SessionInfo}
+     * with a handle and a SUMMARY metadata snapshot.  On any failure the reader
+     * is closed and nothing is registered — a returned handle always names a
+     * live, validated, open reader.
+     */
+    public ToolResult<SessionInfo> openSession(Map<String, Object> args) {
+        final Path canonical;
+        final int series;
+        final Duration timeout;
         try {
-            var request = InspectImageTool.Request.of(
-                    requireString(args, "path"),
-                    optInt(args, "series"),
-                    optEnum(args, "detail", DetailLevel.class),
-                    optDuration(args, "timeout_seconds"),
-                    optLong(args, "max_response_bytes"));
-            return InspectImageTool.execute(request, pathValidator(), readerFactory);
+            Integer seriesArg = optInt(args, "series");
+            series = seriesArg != null ? seriesArg : 0;
+            Duration t = optDuration(args, "timeout_seconds");
+            timeout = t != null ? t : DEFAULT_OPEN_TIMEOUT;
+            String rawPath = requireString(args, "path");
+            var access = pathValidator().check(rawPath);
+            if (access instanceof AccessResult.Denied d) {
+                return ToolResult.accessDenied(d.reason());
+            }
+            canonical = ((AccessResult.Allowed) access).canonicalPath();
         } catch (IllegalArgumentException e) {
             return ToolResult.invalidArgument(e.getMessage());
         }
+
+        // Open + read summary under the timeout.  Kept open on success; closed
+        // on any failure so a half-opened reader never leaks or registers.
+        var task = new CancellableTask(timeout);
+        var opened = task.run(() -> {
+            ImageReader reader = readerFactory.get();
+            try {
+                reader.open(canonical);
+                if (series < 0 || series >= reader.getSeriesCount()) {
+                    throw new IllegalArgumentException("series " + series
+                            + " out of range (file has " + reader.getSeriesCount()
+                            + " series)");
+                }
+                var summary = reader.getMetadata(series, DetailLevel.SUMMARY);
+                return new OpenedReader(reader, summary);
+            } catch (Throwable e) {
+                try { reader.close(); } catch (IOException ignored) { /* opening failed */ }
+                throw e;
+            }
+        });
+
+        return switch (opened) {
+            case CancellableTask.Result.Completed<OpenedReader> c -> {
+                String handle = UUID.randomUUID().toString();
+                sessions.put(handle,
+                        new ImageSession(handle, canonical, c.value().reader()));
+                yield ToolResult.success(new SessionInfo(handle, c.value().summary()));
+            }
+            case CancellableTask.Result.Failed<OpenedReader> f ->
+                    ToolResult.convertError(f.error());
+            case CancellableTask.Result.TimedOut<OpenedReader> t ->
+                    ToolResult.timeout("Opening session timed out after "
+                            + t.elapsed().toMillis() + " ms");
+        };
+    }
+
+    /** Holder for the open reader + its summary while inside the open task. */
+    private record OpenedReader(ImageReader reader, ImageMetadata summary) {}
+
+    /**
+     * Close and forget a session.  Idempotent: closing an unknown or
+     * already-closed handle is a success (so a transport may close defensively
+     * on disconnect without first checking).  Takes the session lock before
+     * closing, so the reader is never closed out from under an in-flight
+     * operation (the transport should cancel in-flight work first).
+     */
+    public ToolResult<Void> closeSession(String handle) {
+        var session = sessions.remove(handle);
+        if (session == null) {
+            return ToolResult.success(null);
+        }
+        session.lock().lock();
+        try {
+            session.close();
+            return ToolResult.success(null);
+        } catch (IOException e) {
+            return ToolResult.ioError("error closing session " + handle, e);
+        } finally {
+            session.lock().unlock();
+        }
+    }
+
+    /** Number of currently-open sessions (for diagnostics/tests). */
+    public int openSessionCount() {
+        return sessions.size();
+    }
+
+    /** A read operation body, parameterized over the reader factory + args. */
+    @FunctionalInterface
+    private interface OpBody<T> {
+        ToolResult<T> run(Supplier<ImageReader> factory, Map<String, Object> args);
+    }
+
+    /**
+     * Route a read operation either statelessly (no {@code handle} → today's
+     * behavior, a fresh reader per call) or against a session's already-open
+     * reader (when {@code handle} is present).  In the session case the session
+     * lock is held for the whole operation (the reader is not thread-safe), the
+     * {@code handle} is replaced by the session's canonical {@code path}, and a
+     * non-closing {@link HeldImageReader} factory is supplied so the tool's
+     * try-with-resources neither re-opens nor closes the shared reader.
+     */
+    private <T> ToolResult<T> withSession(Map<String, Object> args, OpBody<T> body) {
+        Object handleObj = args.get("handle");
+        if (handleObj == null) {
+            return body.run(readerFactory, args);
+        }
+        String handle = handleObj.toString();
+        var session = sessions.get(handle);
+        if (session == null) {
+            return ToolResult.invalidArgument("unknown session handle: " + handle);
+        }
+        session.lock().lock();
+        try {
+            var injected = new LinkedHashMap<>(args);
+            injected.remove("handle");
+            injected.put("path", session.canonicalPath().toString());
+            Supplier<ImageReader> heldFactory =
+                    () -> new HeldImageReader(session.reader());
+            return body.run(heldFactory, injected);
+        } finally {
+            session.lock().unlock();
+        }
+    }
+
+    // ================================================================
+    // Operations — each takes a flat snake_case argument map and returns
+    // a structured ToolResult.  Argument-parsing problems are surfaced as
+    // INVALID_ARGUMENT failures rather than thrown.  Read operations accept a
+    // `handle` (session) as an alternative to `path` (stateless) via
+    // withSession; export_to_tiff is path-only (a one-shot write).
+    // ================================================================
+
+    public ToolResult<ImageMetadata> inspectImage(Map<String, Object> args) {
+        return withSession(args, (factory, a) -> {
+            try {
+                var request = InspectImageTool.Request.of(
+                        requireString(a, "path"),
+                        optInt(a, "series"),
+                        optEnum(a, "detail", DetailLevel.class),
+                        optDuration(a, "timeout_seconds"),
+                        optLong(a, "max_response_bytes"));
+                return InspectImageTool.execute(request, pathValidator(), factory);
+            } catch (IllegalArgumentException e) {
+                return ToolResult.invalidArgument(e.getMessage());
+            }
+        });
     }
 
     public ToolResult<GetThumbnailTool.ThumbnailResult> getThumbnail(
             Map<String, Object> args) {
-        try {
-            var request = GetThumbnailTool.Request.of(
-                    requireString(args, "path"),
-                    optInt(args, "series"),
-                    optEnum(args, "projection", Projection.class),
-                    requireSlice(args, "channels"),
-                    optInt(args, "t"),
-                    optInt(args, "max_size"),
-                    optDuration(args, "timeout_seconds"),
-                    optLong(args, "max_bytes"));
-            return GetThumbnailTool.execute(request, pathValidator(), readerFactory);
-        } catch (IllegalArgumentException e) {
-            return ToolResult.invalidArgument(e.getMessage());
-        }
+        return withSession(args, (factory, a) -> {
+            try {
+                var request = GetThumbnailTool.Request.of(
+                        requireString(a, "path"),
+                        optInt(a, "series"),
+                        optEnum(a, "projection", Projection.class),
+                        requireSlice(a, "channels"),
+                        optInt(a, "t"),
+                        optInt(a, "max_size"),
+                        optDuration(a, "timeout_seconds"),
+                        optLong(a, "max_bytes"));
+                return GetThumbnailTool.execute(request, pathValidator(), factory);
+            } catch (IllegalArgumentException e) {
+                return ToolResult.invalidArgument(e.getMessage());
+            }
+        });
     }
 
     public ToolResult<byte[]> getPlane(Map<String, Object> args) {
-        try {
-            var request = GetPlaneTool.Request.of(
-                    requireString(args, "path"),
-                    optInt(args, "series"),
-                    optSlice(args, "channel"),
-                    optSlice(args, "z"),
-                    optSlice(args, "t"),
-                    optBool(args, "normalize"),
-                    optInt(args, "max_size"),
-                    optDuration(args, "timeout_seconds"),
-                    optLong(args, "max_bytes"));
-            return GetPlaneTool.execute(request, pathValidator(), readerFactory);
-        } catch (IllegalArgumentException e) {
-            return ToolResult.invalidArgument(e.getMessage());
-        }
+        return withSession(args, (factory, a) -> {
+            try {
+                var request = GetPlaneTool.Request.of(
+                        requireString(a, "path"),
+                        optInt(a, "series"),
+                        optSlice(a, "channel"),
+                        optSlice(a, "z"),
+                        optSlice(a, "t"),
+                        optBool(a, "normalize"),
+                        optInt(a, "max_size"),
+                        optDuration(a, "timeout_seconds"),
+                        optLong(a, "max_bytes"));
+                return GetPlaneTool.execute(request, pathValidator(), factory);
+            } catch (IllegalArgumentException e) {
+                return ToolResult.invalidArgument(e.getMessage());
+            }
+        });
     }
 
     public ToolResult<GetIntensityStatsTool.StatsResult> getIntensityStats(
             Map<String, Object> args) {
-        try {
-            // channels/z/t are slice selections (e.g. ":", "0", "0:10",
-            // "0,2", "4:9,11:").  All three are required; ":" means "all"
-            // and, for z/t, triggers adaptive reading within the budget.
-            var request = GetIntensityStatsTool.Request.of(
-                    requireString(args, "path"),
-                    optInt(args, "series"),
-                    requireSlice(args, "channels"),
-                    requireSlice(args, "z"),
-                    requireSlice(args, "t"),
-                    optInt(args, "histogram_bins"),
-                    optDuration(args, "timeout_seconds"),
-                    optLong(args, "max_bytes"));
-            return GetIntensityStatsTool.execute(
-                    request, pathValidator(), readerFactory);
-        } catch (IllegalArgumentException e) {
-            return ToolResult.invalidArgument(e.getMessage());
-        }
+        return withSession(args, (factory, a) -> {
+            try {
+                // channels/z/t are slice selections (e.g. ":", "0", "0:10",
+                // "0,2", "4:9,11:").  All three are required; ":" means "all"
+                // and, for z/t, triggers adaptive reading within the budget.
+                var request = GetIntensityStatsTool.Request.of(
+                        requireString(a, "path"),
+                        optInt(a, "series"),
+                        requireSlice(a, "channels"),
+                        requireSlice(a, "z"),
+                        requireSlice(a, "t"),
+                        optInt(a, "histogram_bins"),
+                        optDuration(a, "timeout_seconds"),
+                        optLong(a, "max_bytes"));
+                return GetIntensityStatsTool.execute(
+                        request, pathValidator(), factory);
+            } catch (IllegalArgumentException e) {
+                return ToolResult.invalidArgument(e.getMessage());
+            }
+        });
     }
 
     public ToolResult<ExportToTiffTool.ExportResult> exportToTiff(
@@ -431,10 +595,13 @@ public final class BioImageService {
         return startDeposit(args).await();
     }
 
-    /** The actual read-and-write loop; runs on the CancellableTask thread. */
+    /**
+     * The actual read-and-write loop; runs on the CancellableTask thread.
+     * Routes to either a session's open reader (when {@code handle} is present,
+     * holding the session lock for the fill) or a fresh path-opened reader.
+     */
     private ToolResult<DepositDescriptor> runDeposit(Map<String, Object> args) {
         try {
-            String rawPath = requireString(args, "path");
             Integer seriesArg = optInt(args, "series");
             int series = seriesArg != null ? seriesArg : 0;
             Slice cReq = requireSlice(args, "channels");
@@ -444,6 +611,27 @@ public final class BioImageService {
             boolean dryRun = dry != null && dry;
             Map<String, Object> target = optMap(args, "target");
 
+            Object handleObj = args.get("handle");
+            if (handleObj != null) {
+                String handle = handleObj.toString();
+                var session = sessions.get(handle);
+                if (session == null) {
+                    return ToolResult.invalidArgument(
+                            "unknown session handle: " + handle);
+                }
+                // Hold the session lock for the whole fill: the reader is not
+                // thread-safe, and closeSession also takes the lock so the
+                // reader can't be closed out from under us mid-read.
+                session.lock().lock();
+                try {
+                    return depositInto(new HeldImageReader(session.reader()),
+                            series, cReq, zReq, tReq, dryRun, target);
+                } finally {
+                    session.lock().unlock();
+                }
+            }
+
+            String rawPath = requireString(args, "path");
             var srcAccess = pathValidator().check(rawPath);
             if (srcAccess instanceof AccessResult.Denied d) {
                 return ToolResult.accessDenied(d.reason());
@@ -452,85 +640,7 @@ public final class BioImageService {
 
             try (var reader = readerFactory.get()) {
                 reader.open(canonicalSrc);
-                if (series < 0 || series >= reader.getSeriesCount()) {
-                    throw new IllegalArgumentException("series " + series
-                            + " out of range (file has " + reader.getSeriesCount()
-                            + " series)");
-                }
-                var si = reader.getMetadata(series, DetailLevel.SUMMARY)
-                        .detailedSeries();
-
-                int[] cs = cReq.resolve(si.sizeC(), "channels");
-                int[] zs = zReq.resolve(si.sizeZ(), "z");
-                int[] ts = tReq.resolve(si.sizeT(), "t");
-
-                int bps = si.pixelType().bytesPerPixel();
-                long planeBytes = (long) si.sizeX() * si.sizeY() * bps;
-                long total = planeBytes * cs.length * zs.length * ts.length;
-
-                var descriptor = new DepositDescriptor(
-                        0L, total, planeBytes,
-                        si.pixelType().name().toLowerCase(),
-                        bps, si.pixelType().isSigned(),
-                        reader.isLittleEndian(series),
-                        si.sizeX(), si.sizeY(),
-                        cs.length, zs.length, ts.length);
-
-                // Dry run: report the size/layout so the client can allocate.
-                if (dryRun) {
-                    return ToolResult.success(descriptor);
-                }
-
-                if (target == null) {
-                    throw new IllegalArgumentException(
-                            "target is required unless dry_run is set");
-                }
-                String kind = strOr(target.get("kind"), "file");
-                String targetPath = requireString(target, "path");
-                Long capacity = optLong(target, "capacity_bytes");
-                if (capacity == null) {
-                    throw new IllegalArgumentException(
-                            "target.capacity_bytes is required");
-                }
-                if (total > capacity) {
-                    throw new IllegalArgumentException("required " + total
-                            + " bytes exceed declared target.capacity_bytes "
-                            + capacity + "; allocate a larger region");
-                }
-
-                var tgtAccess = pathValidator().check(targetPath);
-                if (tgtAccess instanceof AccessResult.Denied d) {
-                    return ToolResult.accessDenied(d.reason());
-                }
-                var canonicalTarget =
-                        ((AccessResult.Allowed) tgtAccess).canonicalPath();
-
-                try (var sink = openSink(kind, canonicalTarget, total)) {
-                    for (int ti = 0; ti < ts.length; ti++) {
-                        for (int zi = 0; zi < zs.length; zi++) {
-                            for (int ci = 0; ci < cs.length; ci++) {
-                                if (Thread.interrupted()) {
-                                    throw new InterruptedException("deposit cancelled");
-                                }
-                                byte[] plane = reader.readPlane(
-                                        series, cs[ci], zs[zi], ts[ti]);
-                                if (plane.length != planeBytes) {
-                                    // Never write a short/oversized plane: that
-                                    // would silently corrupt the buffer.
-                                    throw new IOException("reader returned "
-                                            + plane.length + " bytes for plane (c="
-                                            + cs[ci] + ",z=" + zs[zi] + ",t=" + ts[ti]
-                                            + "), expected " + planeBytes);
-                                }
-                                long offset = (((long) ti * zs.length + zi)
-                                        * cs.length + ci) * planeBytes;
-                                sink.writeAt(offset, plane);
-                            }
-                        }
-                    }
-                    sink.finish();
-                }
-                return ToolResult.success(descriptor);
+                return depositInto(reader, series, cReq, zReq, tReq, dryRun, target);
             }
         } catch (Exception e) {
             // convertError maps IllegalArgumentException → INVALID_ARGUMENT,
@@ -538,6 +648,95 @@ public final class BioImageService {
             // with a non-null message.  Nothing is swallowed.
             return ToolResult.convertError(e);
         }
+    }
+
+    /**
+     * The deposit body given an open reader.  Resolves the selection, builds
+     * the {@link DepositDescriptor}, and (unless {@code dryRun}) writes the
+     * raw native pixel bytes contiguously into the client-owned region.
+     * Throws on any problem; the caller maps it to a structured failure.
+     */
+    private ToolResult<DepositDescriptor> depositInto(
+            ImageReader reader, int series,
+            Slice cReq, Slice zReq, Slice tReq,
+            boolean dryRun, Map<String, Object> target) throws Exception {
+        if (series < 0 || series >= reader.getSeriesCount()) {
+            throw new IllegalArgumentException("series " + series
+                    + " out of range (file has " + reader.getSeriesCount()
+                    + " series)");
+        }
+        var si = reader.getMetadata(series, DetailLevel.SUMMARY).detailedSeries();
+
+        int[] cs = cReq.resolve(si.sizeC(), "channels");
+        int[] zs = zReq.resolve(si.sizeZ(), "z");
+        int[] ts = tReq.resolve(si.sizeT(), "t");
+
+        int bps = si.pixelType().bytesPerPixel();
+        long planeBytes = (long) si.sizeX() * si.sizeY() * bps;
+        long total = planeBytes * cs.length * zs.length * ts.length;
+
+        var descriptor = new DepositDescriptor(
+                0L, total, planeBytes,
+                si.pixelType().name().toLowerCase(),
+                bps, si.pixelType().isSigned(),
+                reader.isLittleEndian(series),
+                si.sizeX(), si.sizeY(),
+                cs.length, zs.length, ts.length);
+
+        // Dry run: report the size/layout so the client can allocate.
+        if (dryRun) {
+            return ToolResult.success(descriptor);
+        }
+
+        if (target == null) {
+            throw new IllegalArgumentException(
+                    "target is required unless dry_run is set");
+        }
+        String kind = strOr(target.get("kind"), "file");
+        String targetPath = requireString(target, "path");
+        Long capacity = optLong(target, "capacity_bytes");
+        if (capacity == null) {
+            throw new IllegalArgumentException(
+                    "target.capacity_bytes is required");
+        }
+        if (total > capacity) {
+            throw new IllegalArgumentException("required " + total
+                    + " bytes exceed declared target.capacity_bytes "
+                    + capacity + "; allocate a larger region");
+        }
+
+        var tgtAccess = pathValidator().check(targetPath);
+        if (tgtAccess instanceof AccessResult.Denied d) {
+            return ToolResult.accessDenied(d.reason());
+        }
+        var canonicalTarget = ((AccessResult.Allowed) tgtAccess).canonicalPath();
+
+        try (var sink = openSink(kind, canonicalTarget, total)) {
+            for (int ti = 0; ti < ts.length; ti++) {
+                for (int zi = 0; zi < zs.length; zi++) {
+                    for (int ci = 0; ci < cs.length; ci++) {
+                        if (Thread.interrupted()) {
+                            throw new InterruptedException("deposit cancelled");
+                        }
+                        byte[] plane = reader.readPlane(
+                                series, cs[ci], zs[zi], ts[ti]);
+                        if (plane.length != planeBytes) {
+                            // Never write a short/oversized plane: that
+                            // would silently corrupt the buffer.
+                            throw new IOException("reader returned "
+                                    + plane.length + " bytes for plane (c="
+                                    + cs[ci] + ",z=" + zs[zi] + ",t=" + ts[ti]
+                                    + "), expected " + planeBytes);
+                        }
+                        long offset = (((long) ti * zs.length + zi)
+                                * cs.length + ci) * planeBytes;
+                        sink.writeAt(offset, plane);
+                    }
+                }
+            }
+            sink.finish();
+        }
+        return ToolResult.success(descriptor);
     }
 
     private static PixelSink openSink(String kind, Path path, long requiredBytes)

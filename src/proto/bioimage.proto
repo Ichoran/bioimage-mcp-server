@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+// gRPC contract for the local BioImage microservice.
+//
+// Control plane only: a single bidirectional stream whose lifetime IS the
+// session-owning connection (the exact analogue of the UDS socket adapter).
+// When the stream ends (client gone / cancelled) the server closes every
+// session handle opened on it.  Pixel volumes are NOT carried here — a
+// `deposit` writes raw bytes into a client-owned shared-memory region (see
+// DESIGN.md §9); only its descriptor returns over the wire.  Inspect/stats
+// results are returned as JSON strings (JsonUtil is the single source of
+// truth for that shape); plane/thumbnail return PNG bytes inline.
+//
+// Slice selections (channels/z/t) are the same Python-style strings used on
+// every other transport: ":", "0", "0,2", "4:9", "5:", ":-3".  An empty
+// string means "not provided" and the server reports the missing parameter.
+
+package lab.kerrr.mcpbio.bioimage.v1;
+
+option java_package = "lab.kerrr.mcpbio.bioimageserver.grpc";
+option java_multiple_files = true;
+option java_outer_classname = "BioImageProto";
+
+service BioImage {
+  // The whole session (open, ops, close) lives inside one bidi stream.
+  rpc Session(stream ClientMsg) returns (stream ServerMsg);
+}
+
+// ---- client → server ----
+
+message ClientMsg {
+  // Client-chosen correlation id, echoed on the matching reply.
+  string id = 1;
+  oneof msg {
+    OpenSession open = 2;
+    CloseSession close = 3;
+    InspectRequest inspect = 4;
+    PlaneRequest plane = 5;
+    StatsRequest stats = 6;
+    ThumbnailRequest thumbnail = 7;
+    DepositRequest deposit = 8;
+    ShutdownRequest shutdown = 9;
+  }
+}
+
+message OpenSession {
+  string path = 1;
+  optional int32 series = 2;  // default 0
+}
+
+message CloseSession {
+  string handle = 1;
+}
+
+// Every operation carries EITHER `path` (stateless) OR `handle` (session).
+message InspectRequest {
+  string path = 1;
+  string handle = 2;
+  optional int32 series = 3;
+  optional string detail = 4;  // summary | standard | full
+}
+
+message PlaneRequest {
+  string path = 1;
+  string handle = 2;
+  optional int32 series = 3;
+  string channel = 4;          // single-index slice
+  string z = 5;
+  string t = 6;
+  optional bool normalize = 7; // default true
+  optional int32 max_size = 8;
+}
+
+message StatsRequest {
+  string path = 1;
+  string handle = 2;
+  optional int32 series = 3;
+  string channels = 4;         // slice selections
+  string z = 5;
+  string t = 6;
+  optional int32 histogram_bins = 7;
+}
+
+message ThumbnailRequest {
+  string path = 1;
+  string handle = 2;
+  optional int32 series = 3;
+  optional string projection = 4;  // adaptive | mid_slice | max_intensity | sum
+  string channels = 5;
+  string t = 6;
+  optional int32 max_size = 7;
+}
+
+message DepositRequest {
+  string path = 1;
+  string handle = 2;
+  optional int32 series = 3;
+  string channels = 4;
+  string z = 5;
+  string t = 6;
+  optional bool dry_run = 7;
+  DepositTarget target = 8;        // omit when dry_run
+  optional int32 timeout_seconds = 9;
+}
+
+message DepositTarget {
+  string kind = 1;                 // "file"
+  string path = 2;
+  int64 capacity_bytes = 3;
+}
+
+message ShutdownRequest {}
+
+// ---- server → client ----
+
+message ServerMsg {
+  string id = 1;                   // echoes the request id (empty for hello)
+  oneof msg {
+    Ready ready = 2;
+    SessionOpened session_opened = 3;
+    JsonResult json = 4;           // inspect / stats
+    PngResult png = 5;             // plane / thumbnail
+    Filled filled = 6;             // deposit descriptor
+    Closed closed = 7;
+    ShutdownOk shutdown_ok = 8;
+    Error error = 9;
+  }
+}
+
+message Ready {
+  int32 protocol = 1;
+  string service = 2;
+  string version = 3;
+}
+
+message SessionOpened {
+  string handle = 1;
+  string summary_json = 2;         // ImageMetadata SUMMARY as JSON
+}
+
+message JsonResult {
+  string json = 1;
+}
+
+message PngResult {
+  bytes png = 1;
+  string projection_used = 2;      // thumbnail only; empty for plane
+}
+
+// Mirrors DepositDescriptor (see DESIGN.md §9).
+message Filled {
+  int64 offset = 1;
+  int64 total_bytes = 2;
+  int64 plane_bytes = 3;
+  string pixel_type = 4;
+  int32 bytes_per_sample = 5;
+  bool signed = 6;
+  bool little_endian = 7;
+  repeated string axis_order = 8;
+  int32 size_x = 9;
+  int32 size_y = 10;
+  int32 size_c = 11;
+  int32 size_z = 12;
+  int32 size_t = 13;
+}
+
+message Closed {
+  string handle = 1;
+}
+
+message ShutdownOk {}
+
+message Error {
+  // access_denied | invalid_argument | timeout | io_error | shutdown_refused
+  string error_kind = 1;
+  string message = 2;
+}

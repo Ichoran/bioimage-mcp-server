@@ -18,20 +18,36 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Base64;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Unix-domain-socket adapter exposing {@link BioImageService}'s shared-memory
- * deposit as a persistent-connection microservice.
+ * Unix-domain-socket adapter exposing {@link BioImageService} as a
+ * session-capable, persistent-connection microservice.
  *
- * <p>Sibling of {@link BioImageMcpServer} and {@link BioImageHttpService}:
- * all transport, no image logic.  The control plane is newline-delimited
- * JSON over the socket; the <em>data</em> plane is the client-owned region
- * that {@link BioImageService#deposit} fills — pixels never travel over the
- * socket.  See DESIGN.md §9 for the full protocol.
+ * <p>Sibling of {@link BioImageMcpServer}, {@link BioImageHttpService}, and
+ * {@link BioImageGrpcService}: all transport, no image logic.  The control
+ * plane is newline-delimited JSON over the socket; the <em>data</em> plane for
+ * a {@code deposit} is the client-owned region that
+ * {@link BioImageService#deposit} fills — pixels never travel over the socket.
+ * See DESIGN.md §9 (deposit) and §10 (sessions) for the full protocol.
+ *
+ * <p>Beyond deposit, this transport serves the read operations
+ * ({@code inspect}, {@code get_plane}, {@code get_intensity_stats},
+ * {@code get_thumbnail}) and the session lifecycle ({@code open}/{@code close}):
+ * a client may {@code open} an image once and address later ops by the returned
+ * {@code handle} instead of a {@code path}, reusing one kept-open reader.  Those
+ * ops run synchronously on the read loop (each bounded by its own budget); only
+ * {@code deposit} runs asynchronously so the loop stays free to notice a
+ * disconnect mid-fill.  When the connection drops, every handle it opened is
+ * closed (its reader released).  PNG results (plane/thumbnail) are returned as
+ * base64 in the reply line — a convenience path; raw pixel volumes should use
+ * {@code deposit} into shared memory.
  *
  * <p><b>Per connection (one deposit in flight, sequential):</b>
  * <pre>
@@ -189,6 +205,16 @@ public final class BioImageSocketService {
                 .run(args);
     }
 
+    /** Build over a pre-configured service (used by tests to inject a fake reader). */
+    static BioImageSocketService create(BioImageService service, Path socketPath) {
+        return new BioImageSocketService(service, socketPath);
+    }
+
+    /** Open session count of the underlying service (test diagnostics). */
+    int openSessionCount() {
+        return service.openSessionCount();
+    }
+
     // ================================================================
     // Connection handling
     // ================================================================
@@ -200,6 +226,8 @@ public final class BioImageSocketService {
         activeConnections.incrementAndGet();
         var writeLock = new Object();
         var current = new AtomicReference<BioImageService.DepositHandle>();
+        // Sessions opened on this connection; closed when it goes away.
+        var handles = new HashSet<String>();
         try (channel;
              var in = new BufferedInputStream(Channels.newInputStream(channel))) {
             OutputStream out = Channels.newOutputStream(channel);
@@ -243,6 +271,15 @@ public final class BioImageSocketService {
                     sendLine(out, writeLock, shutdownOk(id));
                     requestShutdown();
                     break;
+                }
+
+                // Synchronous session + read operations.  These run inline on
+                // the connection thread (each is bounded by its own internal
+                // time/byte budget); only the long-running deposit is async so
+                // the read loop stays free to notice a disconnect during a fill.
+                if (isSyncOp(type)) {
+                    sendLine(out, writeLock, dispatchSync(type, id, msg, handles));
+                    continue;
                 }
 
                 if (!"deposit".equals(type)) {
@@ -290,6 +327,13 @@ public final class BioImageSocketService {
             var dep = current.get();
             if (dep != null) dep.cancel();
         } finally {
+            // The connection is going away: drop every session it opened,
+            // closing the kept-open reader.  Any in-flight deposit was already
+            // cancelled on the EOF/error path; closeSession takes the session
+            // lock, so it waits for that fill to unwind before closing.
+            for (String h : handles) {
+                service.closeSession(h);
+            }
             activeConnections.decrementAndGet();
         }
     }
@@ -343,6 +387,125 @@ public final class BioImageSocketService {
         var map = new LinkedHashMap<String, Object>();
         map.put("type", "shutdown_ok");
         if (id != null) map.put("id", id);
+        return JsonUtil.toJson(map);
+    }
+
+    // ================================================================
+    // Session + read operations (synchronous, inline on the read loop)
+    // ================================================================
+
+    /** Message types handled synchronously (everything but deposit/shutdown). */
+    private static boolean isSyncOp(String type) {
+        return switch (type == null ? "" : type) {
+            case "open", "close", "inspect", "get_intensity_stats",
+                 "get_plane", "get_thumbnail" -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * Run a synchronous operation and build its reply line.  Read ops accept
+     * either {@code path} (stateless) or {@code handle} (session) in {@code msg}
+     * — the service decides; this adapter is pure transport.  {@code open}
+     * records the new handle so the connection's {@code finally} can close it,
+     * and {@code close} removes it.
+     */
+    private String dispatchSync(String type, String id, Map<String, Object> msg,
+                                Set<String> handles) {
+        switch (type) {
+            case "open":
+                return switch (service.openSession(msg)) {
+                    case ToolResult.Success<SessionInfo> s -> {
+                        handles.add(s.value().handle());
+                        yield sessionOpened(id, s.value());
+                    }
+                    case ToolResult.Failure<SessionInfo> f -> errorOf(id, f);
+                };
+            case "close": {
+                String handle = asString(msg.get("handle"));
+                if (handle == null) {
+                    return error(id, "invalid_argument", "close requires a handle");
+                }
+                return switch (service.closeSession(handle)) {
+                    case ToolResult.Success<Void> s -> {
+                        handles.remove(handle);
+                        yield closed(id, handle);
+                    }
+                    case ToolResult.Failure<Void> f -> errorOf(id, f);
+                };
+            }
+            case "inspect":
+                return switch (service.inspectImage(msg)) {
+                    case ToolResult.Success<ImageMetadata> s ->
+                            jsonReply("inspected", id, JsonUtil.toMap(s.value()));
+                    case ToolResult.Failure<ImageMetadata> f -> errorOf(id, f);
+                };
+            case "get_intensity_stats":
+                return switch (service.getIntensityStats(msg)) {
+                    case ToolResult.Success<GetIntensityStatsTool.StatsResult> s ->
+                            jsonReply("stats", id, JsonUtil.toMap(s.value()));
+                    case ToolResult.Failure<GetIntensityStatsTool.StatsResult> f ->
+                            errorOf(id, f);
+                };
+            case "get_plane":
+                return switch (service.getPlane(msg)) {
+                    case ToolResult.Success<byte[]> s -> pngReply("plane", id, s.value(), null);
+                    case ToolResult.Failure<byte[]> f -> errorOf(id, f);
+                };
+            case "get_thumbnail":
+                return switch (service.getThumbnail(msg)) {
+                    case ToolResult.Success<GetThumbnailTool.ThumbnailResult> s ->
+                            pngReply("thumbnail", id, s.value().png(),
+                                    s.value().projectionUsed().name().toLowerCase());
+                    case ToolResult.Failure<GetThumbnailTool.ThumbnailResult> f ->
+                            errorOf(id, f);
+                };
+            default:
+                return error(id, "invalid_argument", "unsupported sync op: " + type);
+        }
+    }
+
+    private static String errorOf(String id, ToolResult.Failure<?> f) {
+        return error(id, f.kind().name().toLowerCase(), f.message());
+    }
+
+    private static String sessionOpened(String id, SessionInfo info) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("type", "session_opened");
+        if (id != null) map.put("id", id);
+        map.putAll(JsonUtil.toMap(info));   // handle + summary
+        return JsonUtil.toJson(map);
+    }
+
+    private static String closed(String id, String handle) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("type", "closed");
+        if (id != null) map.put("id", id);
+        map.put("handle", handle);
+        return JsonUtil.toJson(map);
+    }
+
+    /** JSON-result reply (inspect/stats): the value goes under {@code result}. */
+    private static String jsonReply(String type, String id, Map<String, Object> data) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("type", type);
+        if (id != null) map.put("id", id);
+        map.put("result", data);
+        return JsonUtil.toJson(map);
+    }
+
+    /**
+     * PNG reply (plane/thumbnail): the rendered image is base64 in
+     * {@code png_base64}.  Convenience path — raw pixel volumes should use
+     * {@code deposit} into a shared-memory region instead.
+     */
+    private static String pngReply(String type, String id, byte[] png,
+                                   String projectionUsed) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("type", type);
+        if (id != null) map.put("id", id);
+        if (projectionUsed != null) map.put("projection_used", projectionUsed);
+        map.put("png_base64", Base64.getEncoder().encodeToString(png));
         return JsonUtil.toJson(map);
     }
 

@@ -142,6 +142,57 @@ unified **`Slice`** grammar across every tool, end to end.
   API-http.md, API-socket.md, DESIGN.md §9) updated.
 
 
+## Phase 12: gRPC transport + stateful sessions — done
+
+Full spec in DESIGN.md §10 (sessions) and §11 (gRPC).
+
+- **Build conversion (staged, behavior-preserving first).**
+  `build.mill.yaml` → Scala `build.mill`, done in two verified stages: a
+  faithful 1:1 translation (no new deps) gated on `mill clean && compile
+  && test` (382 green) + assembly + MCP smoke (9/9) — proving the migration
+  changed nothing — then the gRPC layer.  YAML had to go because it can't
+  express a custom codegen task.  `test/package.mill.yaml` folded into an
+  inner `object test`.
+- **Maven-fetched protoc toolchain.** A `protocGenerate` task resolves
+  `com.google.protobuf:protoc` and `io.grpc:protoc-gen-grpc-java` as
+  OS-classified `exe` artifacts via the Mill/coursier resolver
+  (`;classifier=…;type=exe`, `artifactTypes=Some(Set(Type("exe")))`), copies
+  them out of the read-only cache, `chmod +x`, runs protoc, and feeds the
+  output into `generatedSources`.  No system protoc.  Versions pinned in
+  lockstep: grpc-java 1.81.0 / protobuf 3.25.8 / protoc 3.25.8 (+
+  `org.apache.tomcat:annotations-api` for the stubs' `javax.annotation`).
+- **Session layer (`BioImageService`).** `openSession`/`closeSession` +
+  a `withSession` seam; new `ImageSession` (open reader + canonical path +
+  `ReentrantLock`, `AutoCloseable`), `HeldImageReader` (no-op open/close
+  delegating wrapper so the existing tools reuse a shared reader unchanged),
+  `SessionInfo` (handle + SUMMARY metadata).  All five read ops accept
+  `handle` as an alternative to `path`; `runDeposit` refactored into a
+  reusable `depositInto` with a handle branch holding the session lock.
+  `export_to_tiff` stays path-only.  Sessions are owned by the connection;
+  `closeSession` takes the lock so the reader is never closed mid-read.
+- **Socket adapter extended.** Was deposit-only; now serves the read ops +
+  `open`/`close` over NDJSON, accepting `handle` or `path`; JSON results
+  under `result`, PNG as base64 (`png_base64`); per-connection handle set
+  closed on disconnect.
+- **gRPC adapter (`BioImageGrpcService`) + `src/proto/bioimage.proto` +
+  `runner/bioimage_grpc.java`.** Single bidi `Session` stream = one
+  connection; `oneof` client/server messages; loopback TCP via
+  `grpc-netty-shaded`; deposit data still via the shared-memory region;
+  stream death cancels in-flight deposit and closes all handles; `shutdown`
+  honored only when sole stream.
+- **Validated:** 390 → **392 unit tests green** (`SessionTest` ×6,
+  `BioImageGrpcServiceTest` ×2 incl. dropped-stream-closes-reader,
+  `SocketSessionTest` ×2 incl. disconnect cleanup); `mill clean` + full
+  build + codegen clean; MCP smoke test 9/9 with the gRPC-laden assembly.
+  Docs updated: DESIGN §10/§11, service-endpoints.md, API-socket.md, new
+  API-grpc.md, CLAUDE.md (build now Scala), this file.
+
+### Possible future improvements (not blocking)
+- Secure/remote gRPC (TLS, UDS via native transport, authn).
+- Idle-TTL session sweeper as a backstop beyond connection-scoped cleanup.
+- Expose sessions on a future stateful HTTP variant if ever needed.
+
+
 ## Already done
 
 - Project skeleton, Mill build, JUnit 5 tests

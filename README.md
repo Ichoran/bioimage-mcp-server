@@ -78,6 +78,26 @@ with the same caveats about paths:
 Instruct the client to run using jbang via URL or local target, using the
 Claude examples as a guide.
 
+### Other transports (microservices)
+
+The same image core is also exposed by three non-MCP transports, each with
+its own JBang runner and the same `--allow`/`--deny` rules:
+
+- **HTTP** — `runner/bioimage_http.java`; JSON in, JSON/PNG out. See
+  [API-http.md](API-http.md).
+- **Unix socket** — `runner/bioimage_socket.java`; a persistent,
+  session-capable connection plus zero-copy **shared-memory deposit** of raw
+  pixel volumes. See [API-socket.md](API-socket.md).
+- **gRPC (local)** — `runner/bioimage_grpc.java`; a loopback bidirectional
+  stream, also session-capable, reusing the shared-memory deposit for bulk
+  data. See [API-grpc.md](API-grpc.md).
+
+The socket and gRPC transports support **sessions**: open an image once,
+get a handle, and reuse the kept-open reader for many reads; the reader is
+released when the connection closes. See
+[service-endpoints.md](service-endpoints.md) for the shared operation
+catalog and [DESIGN.md](DESIGN.md) §9–§11 for the rationale.
+
 ### File access
 
 By default the server only accesses files under directories declared by
@@ -230,8 +250,12 @@ Central):
 
 ```sh
 mill assembly
-jbang --cp "$(mill show assembly | tr -d '"')" runner/bioimage_mcp.java
+jbang --cp out/assembly.dest/out.jar runner/bioimage_mcp.java
 ```
+
+(`mill assembly` writes the fat jar to `out/assembly.dest/out.jar`.  Don't
+use `mill show assembly` for the classpath — in Mill 1.1 it prints a
+`ref:v0:<hash>:<path>` PathRef string, not a bare path.)
 
 ### Integration tests
 

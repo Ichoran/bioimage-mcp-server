@@ -1,16 +1,16 @@
-# BioImage socket API (shared-memory deposit)
+# BioImage socket API (sessions + shared-memory deposit)
 
 How a client talks to the Unix-domain-socket microservice
-(`BioImageSocketService`), whose job is to transfer **raw pixel volumes**
-into a client-owned shared-memory region with no copy through the socket
-and no PNG/JSON re-encoding.
+(`BioImageSocketService`).  Its signature capability is transferring **raw
+pixel volumes** into a client-owned shared-memory region with no copy through
+the socket and no re-encoding (`deposit`), but it is also a **session-capable**
+transport: a client can `open` an image once and run the read operations
+(`inspect`, `get_plane`, `get_intensity_stats`, `get_thumbnail`, `deposit`)
+against the kept-open reader by `handle`.
 
 For operation arguments, the error model, access control, and pixel-data
-conventions, see **[service-endpoints.md](service-endpoints.md)**.  For
-the design rationale behind the protocol, see **DESIGN.md §9**.
-
-This transport is **deposit-only** (plus a `shutdown` control message).
-Use MCP or HTTP for metadata, previews, statistics, and conversion.
+conventions, see **[service-endpoints.md](service-endpoints.md)**.  For the
+design rationale, see **DESIGN.md §9** (deposit) and **§10** (sessions).
 
 ## 1. The model: two planes
 
@@ -52,7 +52,7 @@ won't contain this class yet):
 
 ```sh
 mill assembly
-java -cp "$(mill show assembly | tr -d '"')" \
+java -cp out/assembly.dest/out.jar \
     lab.kerrr.mcpbio.bioimageserver.BioImageSocketService --allow /dev/shm --allow /data
 ```
 
@@ -82,7 +82,7 @@ socket file on exit.
 On connect, the server immediately sends a hello:
 
 ```json
-{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.1.1"}
+{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.2.0"}
 ```
 
 `protocol` is the wire-protocol version (currently `1`).  Read this line
@@ -148,6 +148,54 @@ You can skip the dry run if you already know the exact size (e.g. from an
 
 `filled` **is** the ready signal: no `filled` ⇒ the region is incomplete
 and must be discarded.
+
+## 5b. Sessions and handle-based reads
+
+To work with one image repeatedly without re-opening and re-parsing it each
+time, `open` a session and address later operations by its `handle`.
+
+```json
+{"type":"open","id":"o1","path":"/data/stack.czi","series":0}
+→ {"type":"session_opened","id":"o1","handle":"e2b1…","summary":{ …SUMMARY metadata… }}
+```
+
+Then any read operation may carry `handle` **instead of** `path`:
+
+```json
+{"type":"inspect","id":"i1","handle":"e2b1…","detail":"full"}
+→ {"type":"inspected","id":"i1","result":{ …full metadata… }}
+
+{"type":"get_plane","id":"p1","handle":"e2b1…","channel":"0","z":"0","t":"0"}
+→ {"type":"plane","id":"p1","png_base64":"iVBOR…"}
+
+{"type":"get_intensity_stats","id":"s1","handle":"e2b1…","channels":":","z":":","t":":"}
+→ {"type":"stats","id":"s1","result":{ … }}
+
+{"type":"get_thumbnail","id":"th1","handle":"e2b1…","channels":":"}
+→ {"type":"thumbnail","id":"th1","projection_used":"max_intensity","png_base64":"iVBOR…"}
+
+{"type":"deposit","id":"d1","handle":"e2b1…","channels":"0","z":":","t":"0","target":{…}}
+→ {"type":"filled","id":"d1", …descriptor… }
+
+{"type":"close","id":"c1","handle":"e2b1…"}
+→ {"type":"closed","id":"c1","handle":"e2b1…"}
+```
+
+Notes:
+- **`handle` or `path`.** Every read op accepts either; with `handle` it reuses
+  the session's open reader, with `path` it is stateless (as on HTTP/MCP).
+- **Result framing.** JSON ops reply with the value under `result`
+  (`inspected`/`stats`).  PNG ops reply with the image base64-encoded in
+  `png_base64` (`plane`/`thumbnail`; thumbnail also reports `projection_used`).
+  Base64 over the line is a convenience — for raw pixel volumes prefer
+  `deposit` into shared memory.
+- **Lifetime.** A handle is owned by this connection.  `close` releases it; if
+  the connection drops, every session it opened is closed (its reader
+  released) automatically.  Operations on one handle are serialized server-side
+  (Bio-Formats readers are not thread-safe).
+- **Synchronicity.** `open`/`close` and the JSON/PNG reads are answered inline
+  and in order; only `deposit` is asynchronous (one in flight per connection),
+  so the connection stays responsive to a disconnect during a long fill.
 
 ## 6. Errors
 

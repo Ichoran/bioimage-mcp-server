@@ -242,6 +242,17 @@ final class JsonUtil {
     }
 
     // ================================================================
+    // SessionInfo
+    // ================================================================
+
+    static Map<String, Object> toMap(SessionInfo s) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("handle", s.handle());
+        map.put("summary", toMap(s.summary()));
+        return map;
+    }
+
+    // ================================================================
     // DepositDescriptor
     // ================================================================
 

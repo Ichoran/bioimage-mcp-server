@@ -418,8 +418,8 @@ public class bioimage_mcp {
 
 After `mill publish-local` (or equivalent), either:
 - Temporarily edit the `//DEPS` line to use the snapshot version, or
-- Use `jbang --cp $(mill show assembly) bioimage-mcp.java` to point at the local
-  build output, or
+- Use `mill assembly && jbang --cp out/assembly.dest/out.jar bioimage-mcp.java`
+  to point at the local build output (the fat jar Mill writes there), or
 - Run directly via Mill: `mill run`
 
 The README should document both workflows clearly.
@@ -755,3 +755,125 @@ preferred until profiling shows the `tmpfs` indirection matters, because it
 is one cross-platform code path with no FFM and no 2 GB
 `MappedByteBuffer` limit (positional `FileChannel` writes take `long`
 offsets).
+
+
+## 10. Stateful Sessions (kept-open readers)
+
+Every operation in §2 is **stateless**: it opens a fresh Bio-Formats reader,
+does one thing, and closes it.  That is the right default for the
+request/response transports (MCP/stdio, HTTP), but it is wasteful for the
+persistent-connection transports, where a client typically keeps working with
+the *same* image — reading many planes, depositing several volumes.  Re-opening
+and re-parsing the file on every call repeats the most expensive metadata work.
+
+A **session** lets a client open an image once and reuse the open reader.
+
+### 10.1 Model
+
+- `open` validates a `path`, opens a reader, reads its SUMMARY metadata, and
+  registers an `ImageSession` keyed by a server-generated **handle** (a UUID).
+  It returns `{handle, summary}`.
+- Any read operation (`inspect_image`, `get_plane`, `get_intensity_stats`,
+  `get_thumbnail`, `deposit`) may then carry `handle` **instead of** `path`,
+  and runs against the already-open reader.  `export_to_tiff` stays path-only
+  (a one-shot write, no reuse benefit).
+- `close` removes the session and closes the reader.
+
+The seam in `BioImageService` is deliberately small.  A `withSession(args,
+body)` helper routes each read op: with no `handle` it calls the body with the
+normal per-call reader factory (today's behavior, unchanged); with a `handle`
+it holds the session lock, injects the session's canonical `path`, and supplies
+a `HeldImageReader` factory.  `HeldImageReader` is an `ImageReader` over the
+session's open reader whose `open()` and `close()` are **no-ops** — so the
+existing tools, which all do `try (var r = factory.get()) { r.open(path); … }`,
+run unchanged without re-opening or closing the shared reader.
+
+### 10.2 Ownership, concurrency, lifecycle
+
+- **The transport owns the lifetime, the service owns the registry.**
+  `BioImageService` holds the `handle → ImageSession` map and the open/close
+  operations; it does not decide *when* a session dies.  A session-capable
+  transport tracks the handles opened on each connection and calls
+  `closeSession` for each when the client closes them or the connection drops.
+  This is the same per-connection ownership the deposit cancellation already
+  uses.
+- **Disconnect closes the reader.**  This is the core guarantee: an `open`
+  reader is never leaked.  The socket adapter closes a connection's handles in
+  its `finally`; the gRPC adapter does so on stream `onError`/`onCompleted`.
+- **Per-session serialization.**  Bio-Formats readers are not thread-safe, so
+  every operation on a session holds the session's `ReentrantLock`.
+  `closeSession` also takes the lock, so the reader is never closed out from
+  under an in-flight read (the transport cancels an in-flight deposit first;
+  `closeSession` then waits for it to unwind before closing).
+- **Access control still applies.**  The path is checked at `open`, and the
+  (stable) deny/allow policy is re-applied on each handle operation; a handle
+  is not a capability that bypasses the policy.
+
+### 10.3 Which transports
+
+Sessions are exposed on the **persistent-connection** transports only —
+the UDS socket (§9) and gRPC (§11).  HTTP has no connection to own a session's
+lifetime (a leaked handle would have no natural close trigger), and the stdio
+MCP server is single-client/sequential, so the reuse win does not justify the
+added surface.  Both stay stateless.
+
+
+## 11. Local gRPC Transport
+
+Some access patterns are inherently stateful: if you hold an open connection,
+you very likely want to keep reading the same image.  gRPC is a natural fit —
+a typed, streaming, widely-supported RPC layer — and pairs well with the
+shared-memory deposit for the bulk data.
+
+### 11.1 Shape
+
+`BioImageGrpcService` is a fourth sibling adapter over `BioImageService`
+(alongside MCP, HTTP, socket): all transport, no image logic.  It exposes a
+single bidirectional RPC
+
+```proto
+service BioImage { rpc Session(stream ClientMsg) returns (stream ServerMsg); }
+```
+
+whose stream lifetime **is** the session-owning connection — the exact
+analogue of the socket adapter's persistent NDJSON connection.  `ClientMsg` /
+`ServerMsg` are `oneof` envelopes carrying the same operations and the same
+string slice-selections used on every other transport.  The wire contract is
+`src/proto/bioimage.proto`; the Java stubs are generated at build time (see
+§11.3).
+
+- **Control plane:** the protobuf stream.  Inspect/stats results return as JSON
+  strings (`JsonUtil` is the single source of truth for that shape rather than
+  re-modelling all metadata in protobuf); plane/thumbnail return PNG bytes
+  inline (acceptable on a local link).
+- **Data plane:** a `deposit` writes raw pixels into the same client-owned
+  shared-memory region as §9; only the `DepositDescriptor` (`Filled`) crosses
+  the wire.
+
+### 11.2 Lifecycle and local-only binding
+
+gRPC delivers a stream's `onNext` calls serially.  Read ops are answered
+inline; a `deposit` is awaited on a worker and its reply written back under a
+write-lock, so the stream stays responsive (one deposit in flight per stream).
+On stream `onError`/`onCompleted` the adapter cancels any in-flight deposit and
+closes every handle the stream opened — closing the kept-open readers.  A
+`shutdown` message is honored only when the requester is the sole connected
+stream, mirroring the socket adapter.
+
+The server binds the **loopback interface only** (`127.0.0.1`), via
+`grpc-netty-shaded` — cross-platform, no native epoll dependency, no TLS, no
+auth.  This is a local data-plane transport by design; a remote/secured gRPC
+endpoint (TLS, UDS via native transport, authn) is a future extension that
+does not change the tool logic.
+
+### 11.3 Build: Maven-fetched protoc toolchain
+
+The build (`build.mill`, Scala) resolves the `protoc` compiler
+(`com.google.protobuf:protoc`) and the gRPC plugin
+(`io.grpc:protoc-gen-grpc-java`) from Maven as OS-classified `exe` artifacts,
+runs them in a `protocGenerate` task, and feeds the generated Java into
+`generatedSources`.  No system `protoc` is required, and the whole toolchain
+is version-pinned in lockstep with the grpc-java/protobuf-java runtime (grpc
+1.81.0 / protobuf 3.25.8).  Converting from the former `build.mill.yaml` to
+Scala was necessary because the YAML build format cannot express a custom
+code-generation task.

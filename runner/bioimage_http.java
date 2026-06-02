@@ -18,7 +18,7 @@
 // jbang's classpath):
 //
 //     mill assembly
-//     java -cp "$(mill show assembly | tr -d '"')" \
+//     java -cp out/assembly.dest/out.jar \
 //         lab.kerrr.mcpbio.bioimageserver.BioImageHttpService --port 8722
 //
 // Once a release containing this class is published, the one-line

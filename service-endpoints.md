@@ -9,8 +9,10 @@ formats are documented separately:
 - **[API-http.md](API-http.md)** — the plain-HTTP microservice
   (`BioImageHttpService`, runner `bioimage_http.java`).
 - **[API-socket.md](API-socket.md)** — the Unix-domain-socket
-  shared-memory deposit service (`BioImageSocketService`, runner
+  session + shared-memory deposit service (`BioImageSocketService`, runner
   `bioimage_socket.java`).
+- **[API-grpc.md](API-grpc.md)** — the local gRPC session service
+  (`BioImageGrpcService`, runner `bioimage_grpc.java`).
 - **MCP** — the stdio MCP server (`BioImageMcpServer`, runner
   `bioimage_mcp.java`) is self-describing: an MCP client calls
   `tools/list` to discover the tools and their JSON schemas.  See the
@@ -21,18 +23,27 @@ formats are documented separately:
 
 The core operations are the same; each transport exposes a subset.
 
-| Operation             | Returns                    | MCP | HTTP | Socket |
-|-----------------------|----------------------------|:---:|:----:|:------:|
-| `inspect_image`       | metadata (JSON)            |  ✓  |  ✓   |        |
-| `get_thumbnail`       | RGB PNG                    |  ✓  |  ✓   |        |
-| `get_plane`           | grayscale PNG              |  ✓  |  ✓   |        |
-| `get_intensity_stats` | statistics (JSON)          |  ✓  |  ✓   |        |
-| `export_to_tiff`      | result (JSON); writes file |  ✓  |  ✓   |        |
-| `deposit`             | region descriptor          |     |      |   ✓    |
+| Operation             | Returns                    | MCP | HTTP | Socket | gRPC |
+|-----------------------|----------------------------|:---:|:----:|:------:|:----:|
+| `inspect_image`       | metadata (JSON)            |  ✓  |  ✓   |   ✓    |  ✓   |
+| `get_thumbnail`       | RGB PNG                    |  ✓  |  ✓   |   ✓    |  ✓   |
+| `get_plane`           | grayscale PNG              |  ✓  |  ✓   |   ✓    |  ✓   |
+| `get_intensity_stats` | statistics (JSON)          |  ✓  |  ✓   |   ✓    |  ✓   |
+| `export_to_tiff`      | result (JSON); writes file |  ✓  |  ✓   |        |      |
+| `deposit`             | region descriptor          |     |      |   ✓    |  ✓   |
+| `open` / `close`      | session handle             |     |      |   ✓    |  ✓   |
 
-The socket transport is **deposit-only** by design (its purpose is bulk
-raw-pixel transfer into shared memory); use MCP or HTTP for metadata,
-previews, statistics, and conversion.
+**Sessions (socket + gRPC only).** The two persistent-connection transports
+let a client `open` an image once — receiving a **handle** plus a SUMMARY
+metadata snapshot — and then address subsequent read operations
+(`inspect_image`, `get_plane`, `get_intensity_stats`, `get_thumbnail`,
+`deposit`) by that handle (in place of `path`), reusing one already-open
+reader instead of re-opening and re-parsing the file each call.  A session is
+owned by the connection that opened it: when the client sends `close`, or the
+connection drops, the kept-open reader is closed.  See §3.7 and the
+per-transport docs.  MCP and HTTP remain **stateless** (path per call); HTTP
+has no persistent connection to own a session lifetime, and the stdio MCP
+server is single-client/sequential.
 
 ## 2. Argument conventions
 
@@ -159,7 +170,8 @@ details in **[API-socket.md](API-socket.md)**.
 
 | Param             | Type   | Default | Notes |
 |-------------------|--------|---------|-------|
-| `path`            | string | —       | **required** source |
+| `path`            | string | —       | **required** source (or use `handle`) |
+| `handle`          | string | —       | session handle; alternative to `path` (socket/gRPC) |
 | `series`          | int    | `0`     | |
 | `channels`        | slice  | —       | **required** (`":"` = all); any list |
 | `z`               | slice  | —       | **required** (`":"` = all); any list |
@@ -172,6 +184,27 @@ details in **[API-socket.md](API-socket.md)**.
 > "all". To deposit a whole volume write `"z": ":"`, etc.; to deposit one
 > plane write single indices. This is deliberate, so a deposit can never
 > silently pull the entire dataset.
+
+### 3.7 `open` / `close` → session handle (socket + gRPC)
+
+`open` keeps a reader open and returns a `handle` plus a SUMMARY metadata
+snapshot; `close` releases it.  Any of the read operations above
+(`inspect_image`, `get_plane`, `get_intensity_stats`, `get_thumbnail`,
+`deposit`) may then pass `handle` **instead of** `path` to run against the
+already-open reader.  Operations on one handle are serialized (Bio-Formats
+readers are not thread-safe).
+
+| Param             | Type   | Default | Notes |
+|-------------------|--------|---------|-------|
+| `path`            | string | —       | **required** for `open` — the image to open |
+| `series`          | int    | `0`     | `open`: series whose summary is returned |
+| `timeout_seconds` | int    | `30`    | `open`: budget for parsing metadata |
+| `handle`          | string | —       | **required** for `close` |
+
+A handle is valid only on the connection that opened it and only until that
+connection closes it or drops; there is no cross-connection sharing.  See
+**[API-socket.md](API-socket.md)** / **[API-grpc.md](API-grpc.md)** for the
+exact messages.
 
 ## 4. Error model
 
@@ -204,10 +237,12 @@ before checking.
 
 Allow/deny paths are configured by editing the runner file
 (`.allow(...)` / `.deny(...)`) or via repeatable CLI flags `--allow
-<path>` / `--deny <path>`, merged together.  The HTTP and socket
+<path>` / `--deny <path>`, merged together.  The HTTP, socket, and gRPC
 transports have no client roots, so they rely entirely on allow/deny —
 a request to a path outside the allow list is rejected with
-`ACCESS_DENIED`.
+`ACCESS_DENIED`.  A session `handle` does not bypass this: the path was
+already checked at `open` time, and the (still-stable) allow/deny policy is
+re-applied on every handle operation.
 
 ## 6. Pixel-data conventions
 

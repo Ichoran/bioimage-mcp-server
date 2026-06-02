@@ -21,7 +21,7 @@
 // yet, and would shadow the local copy on jbang's classpath):
 //
 //     mill assembly
-//     java -cp "$(mill show assembly | tr -d '"')" \
+//     java -cp out/assembly.dest/out.jar \
 //         lab.kerrr.mcpbio.bioimageserver.BioImageSocketService \
 //         --allow /dev/shm
 // =================================================================

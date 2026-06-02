@@ -28,7 +28,7 @@ classes, run the class directly from the fat jar (avoids the published
 
 ```sh
 mill assembly
-java -cp "$(mill show assembly | tr -d '"')" \
+java -cp out/assembly.dest/out.jar \
     lab.kerrr.mcpbio.bioimageserver.BioImageHttpService --port 8722 --allow /data
 ```
 

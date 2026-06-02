@@ -11,7 +11,7 @@
 // For development against a local build, use one of:
 //
 //     mill run                          # via Mill directly
-//     jbang --cp "$(mill show assembly | tr -d '"')" bioimage-mcp.java
+//     mill assembly && jbang --cp out/assembly.dest/out.jar bioimage_mcp.java
 //
 // Customize allow/deny paths below to control which filesystem
 // paths the server may access.  See DESIGN.md §5 for details.
