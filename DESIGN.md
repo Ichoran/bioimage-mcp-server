@@ -698,9 +698,9 @@ and echoed):
 ```json
 {"type":"deposit","id":"c1",
  "path":"/data/stack.czi","series":0,
- "channel":0,                      // or channel_start/channel_end; default all
- "z_start":0,"z_end":-1,           // default all Z;  -1 = last
- "t_start":0,"t_end":0,            // default all T
+ "channels":"0",                   // slice selection (required): ":" = all,
+ "z":":",                          //   "0,2" = list, "4:9" = range, etc.
+ "t":"0",                          //   omitting any of these is an error
  "target":{"kind":"file","path":"/dev/shm/bio-7f3a","capacity_bytes":43352064},
  "timeout_seconds":60}
 ```

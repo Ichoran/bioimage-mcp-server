@@ -106,6 +106,42 @@ Full protocol spec in DESIGN.md §9.
   cheap way to size regions for clients that prefer request/response.
 
 
+## Phase 11: Slice selections (Python-style ranges) — done
+
+Replaced the old single/`_start`/`_end` integer selection params with a
+unified **`Slice`** grammar across every tool, end to end.
+
+- **`Slice`** — a comma-separated list of Python-style terms parsed from
+  a string (a bare int is also accepted): `"9"`, `"-9"`, `"2:4"` (half-
+  open), `"5:"`, `":-3"`, `":"`, and lists like `"0,2,5"` / `"4:9,11:"`.
+  Resolves against a dimension size to an `int[]` (ordered, repeats
+  allowed — `"3,3"` reads a plane twice on purpose). Half-open like
+  Python; **explicit** out-of-bounds is an error (no silent clamp);
+  empty selections error; step slices rejected. Also
+  `resolveContiguous` → `Range` (for the OME-TIFF writer) and
+  `resolveSingle` → int (for single-plane tools).
+- **`Range`** promoted to a top-level resolved (inclusive) type; its old
+  negative/inclusive `resolve` logic moved into `Slice`.
+- **Missing = empty = error.** Omitting `channels`/`z`/`t` is now an
+  error (you must write `":"` for all), so a call can never silently
+  pull a whole dimension — fixes the deposit "grab everything" footgun.
+  Single-plane selectors (`get_plane` channel/z/t, `get_thumbnail` t)
+  keep their `0` default and now accept negative indices.
+- **Wire params unified** to `channels`/`z`/`t` (slices) and
+  `channel`/`z`/`t` (single) — replacing `channel`/`channel_start`/…,
+  `z_slice`/`z_start`/…, `timepoint`/`t_start`/…, and the old `int[]
+  channels`. Stats `:` on z/t still triggers adaptive reading; export
+  requires z/t to be a single contiguous range (writer constraint),
+  while channels may be any list.
+- Updated MCP schemas, all five tools, `BioImageService`, `JsonUtil`
+  (`StatsResult` now reports `channels`/`z_requested`/`t_requested` as
+  int[]), the integration smoke test, and all tool tests; added
+  `SliceTest`. Validated: 382 unit tests green, MCP smoke test 9/9, live
+  socket deposit with `channels:"0,2"` (non-contiguous) + missing-
+  selection error. **Breaking** API change; docs (service-endpoints.md,
+  API-http.md, API-socket.md, DESIGN.md §9) updated.
+
+
 ## Already done
 
 - Project skeleton, Mill build, JUnit 5 tests

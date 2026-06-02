@@ -2,7 +2,6 @@ package lab.kerrr.mcpbio.bioimageserver;
 
 import lab.kerrr.mcpbio.bioimageserver.ExportToTiffTool.Compression;
 import lab.kerrr.mcpbio.bioimageserver.ExportToTiffTool.MetadataMode;
-import lab.kerrr.mcpbio.bioimageserver.GetIntensityStatsTool.Range;
 import lab.kerrr.mcpbio.bioimageserver.GetThumbnailTool.Projection;
 import lab.kerrr.mcpbio.bioimageserver.ImageMetadata.DetailLevel;
 import lab.kerrr.mcpbio.bioimageserver.PathAccessControl.AccessResult;
@@ -272,8 +271,8 @@ public final class BioImageService {
                     requireString(args, "path"),
                     optInt(args, "series"),
                     optEnum(args, "projection", Projection.class),
-                    optIntArray(args, "channels"),
-                    optInt(args, "timepoint"),
+                    requireSlice(args, "channels"),
+                    optInt(args, "t"),
                     optInt(args, "max_size"),
                     optDuration(args, "timeout_seconds"),
                     optLong(args, "max_bytes"));
@@ -288,9 +287,9 @@ public final class BioImageService {
             var request = GetPlaneTool.Request.of(
                     requireString(args, "path"),
                     optInt(args, "series"),
-                    optInt(args, "channel"),
-                    optInt(args, "z_slice"),
-                    optInt(args, "timepoint"),
+                    optSlice(args, "channel"),
+                    optSlice(args, "z"),
+                    optSlice(args, "t"),
                     optBool(args, "normalize"),
                     optInt(args, "max_size"),
                     optDuration(args, "timeout_seconds"),
@@ -304,21 +303,15 @@ public final class BioImageService {
     public ToolResult<GetIntensityStatsTool.StatsResult> getIntensityStats(
             Map<String, Object> args) {
         try {
-            // Single-value params (channel, z_slice, timepoint) are shortcuts
-            // for a Range of one element.  Range params (channel_start/end,
-            // z_start/end, t_start/end) allow specifying inclusive ranges.
-            // Using both forms for the same dimension is an error.
-            Range channels = parseRange(args,
-                    "channel", "channel_start", "channel_end");
-            Range zRange = parseRange(args, "z_slice", "z_start", "z_end");
-            Range tRange = parseRange(args, "timepoint", "t_start", "t_end");
-
+            // channels/z/t are slice selections (e.g. ":", "0", "0:10",
+            // "0,2", "4:9,11:").  All three are required; ":" means "all"
+            // and, for z/t, triggers adaptive reading within the budget.
             var request = GetIntensityStatsTool.Request.of(
                     requireString(args, "path"),
                     optInt(args, "series"),
-                    channels,
-                    zRange,
-                    tRange,
+                    requireSlice(args, "channels"),
+                    requireSlice(args, "z"),
+                    requireSlice(args, "t"),
                     optInt(args, "histogram_bins"),
                     optDuration(args, "timeout_seconds"),
                     optLong(args, "max_bytes"));
@@ -336,11 +329,9 @@ public final class BioImageService {
                     requireString(args, "path"),
                     requireString(args, "output_path"),
                     optInt(args, "series"),
-                    optIntArray(args, "channels"),
-                    optInt(args, "z_start"),
-                    optInt(args, "z_end"),
-                    optInt(args, "t_start"),
-                    optInt(args, "t_end"),
+                    requireSlice(args, "channels"),
+                    requireSlice(args, "z"),
+                    requireSlice(args, "t"),
                     optEnum(args, "compression", Compression.class),
                     optEnum(args, "metadata_mode", MetadataMode.class),
                     optDuration(args, "timeout_seconds"),
@@ -446,9 +437,9 @@ public final class BioImageService {
             String rawPath = requireString(args, "path");
             Integer seriesArg = optInt(args, "series");
             int series = seriesArg != null ? seriesArg : 0;
-            Range cReq = parseRange(args, "channel", "channel_start", "channel_end");
-            Range zReq = parseRange(args, "z_slice", "z_start", "z_end");
-            Range tReq = parseRange(args, "timepoint", "t_start", "t_end");
+            Slice cReq = requireSlice(args, "channels");
+            Slice zReq = requireSlice(args, "z");
+            Slice tReq = requireSlice(args, "t");
             Boolean dry = optBool(args, "dry_run");
             boolean dryRun = dry != null && dry;
             Map<String, Object> target = optMap(args, "target");
@@ -469,16 +460,13 @@ public final class BioImageService {
                 var si = reader.getMetadata(series, DetailLevel.SUMMARY)
                         .detailedSeries();
 
-                var c = (cReq != null ? cReq : new Range(0, -1))
-                        .resolve(si.sizeC(), "channel");
-                var z = (zReq != null ? zReq : new Range(0, -1))
-                        .resolve(si.sizeZ(), "Z-slice");
-                var t = (tReq != null ? tReq : new Range(0, -1))
-                        .resolve(si.sizeT(), "timepoint");
+                int[] cs = cReq.resolve(si.sizeC(), "channels");
+                int[] zs = zReq.resolve(si.sizeZ(), "z");
+                int[] ts = tReq.resolve(si.sizeT(), "t");
 
                 int bps = si.pixelType().bytesPerPixel();
                 long planeBytes = (long) si.sizeX() * si.sizeY() * bps;
-                long total = planeBytes * c.count() * z.count() * t.count();
+                long total = planeBytes * cs.length * zs.length * ts.length;
 
                 var descriptor = new DepositDescriptor(
                         0L, total, planeBytes,
@@ -486,7 +474,7 @@ public final class BioImageService {
                         bps, si.pixelType().isSigned(),
                         reader.isLittleEndian(series),
                         si.sizeX(), si.sizeY(),
-                        c.count(), z.count(), t.count());
+                        cs.length, zs.length, ts.length);
 
                 // Dry run: report the size/layout so the client can allocate.
                 if (dryRun) {
@@ -517,7 +505,6 @@ public final class BioImageService {
                 var canonicalTarget =
                         ((AccessResult.Allowed) tgtAccess).canonicalPath();
 
-                int[] cs = c.toArray(), zs = z.toArray(), ts = t.toArray();
                 try (var sink = openSink(kind, canonicalTarget, total)) {
                     for (int ti = 0; ti < ts.length; ti++) {
                         for (int zi = 0; zi < zs.length; zi++) {
@@ -582,37 +569,18 @@ public final class BioImageService {
     // ================================================================
 
     /**
-     * Parse a dimension range from either a single-value parameter or
-     * a start/end pair.  Returns null if none are specified.
-     *
-     * @throws IllegalArgumentException if the single-value and range
-     *         params are both specified
+     * Parse a required slice selection (e.g. "0", "0:10", "0,2", ":").
+     * A missing parameter is an error — callers must be explicit (use ":"
+     * for all), so a dimension can never be silently selected in full.
      */
-    private static Range parseRange(Map<String, Object> args,
-                                    String singleKey,
-                                    String startKey,
-                                    String endKey) {
-        var single = optInt(args, singleKey);
-        var start = optInt(args, startKey);
-        var end = optInt(args, endKey);
+    private static Slice requireSlice(Map<String, Object> args, String key) {
+        return Slice.parse(args.get(key), key);
+    }
 
-        if (single != null && (start != null || end != null)) {
-            throw new IllegalArgumentException(
-                    "cannot specify both '" + singleKey + "' and '"
-                    + startKey + "'/'" + endKey + "'");
-        }
-
-        if (single != null) {
-            return Range.of(single);
-        }
-        if (start != null || end != null) {
-            // If only one bound is given, default to 0 for missing
-            // start and -1 (last element) for missing end.
-            int s = start != null ? start : 0;
-            int e = end != null ? end : -1;
-            return new Range(s, e);
-        }
-        return null;
+    /** Parse an optional slice; null if the parameter is absent. */
+    private static Slice optSlice(Map<String, Object> args, String key) {
+        var val = args.get(key);
+        return val == null ? null : Slice.parse(val, key);
     }
 
     private static String requireString(Map<String, Object> args, String key) {
@@ -657,26 +625,6 @@ public final class BioImageService {
     private static Duration optDuration(Map<String, Object> args, String key) {
         var seconds = optInt(args, key);
         return seconds != null ? Duration.ofSeconds(seconds) : null;
-    }
-
-    private static int[] optIntArray(Map<String, Object> args, String key) {
-        var val = args.get(key);
-        if (val == null) return null;
-        if (val instanceof List<?> list) {
-            int[] result = new int[list.size()];
-            for (int i = 0; i < list.size(); i++) {
-                var item = list.get(i);
-                if (item instanceof Number n) {
-                    result[i] = n.intValue();
-                } else {
-                    throw new IllegalArgumentException(
-                            key + "[" + i + "]: expected integer, got: " + item);
-                }
-            }
-            return result;
-        }
-        throw new IllegalArgumentException(
-                key + ": expected array, got: " + val.getClass().getSimpleName());
     }
 
     /**

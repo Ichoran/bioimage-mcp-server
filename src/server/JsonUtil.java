@@ -172,21 +172,13 @@ final class JsonUtil {
     static Map<String, Object> toMap(StatsResult r) {
         var map = new LinkedHashMap<String, Object>();
         map.put("pixel_type", r.pixelType().name().toLowerCase());
-        map.put("channels", toMap(r.channels()));
-        map.put("z_range", toMap(r.zRange()));
-        map.put("t_range", toMap(r.tRange()));
+        map.put("channels", r.channels());
+        map.put("z_requested", r.zRequested());
+        map.put("t_requested", r.tRequested());
         map.put("z_slices_used", r.zSlicesUsed());
         map.put("timepoints_used", r.timepointsUsed());
         map.put("per_channel", r.perChannel().stream()
                 .map(JsonUtil::toMap).toList());
-        return map;
-    }
-
-    static Map<String, Object> toMap(GetIntensityStatsTool.Range range) {
-        if (range == null) return null;
-        var map = new LinkedHashMap<String, Object>();
-        map.put("start", range.start());
-        map.put("end", range.end());
         return map;
     }
 

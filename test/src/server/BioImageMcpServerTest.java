@@ -59,10 +59,10 @@ class BioImageMcpServerTest {
     @Test
     void getThumbnailDefaultsApplied() {
         var req = GetThumbnailTool.Request.of(
-                "/tmp/test.czi", null, null, null, null, null, null, null);
+                "/tmp/test.czi", null, null, Slice.all(), null, null, null, null);
         assertEquals(0, req.series());
         assertEquals(Projection.ADAPTIVE, req.projection());
-        assertNull(req.channels());
+        assertTrue(req.channels().isAll());
         assertEquals(0, req.timepoint());
         assertEquals(1024, req.maxSize());
     }
@@ -72,32 +72,31 @@ class BioImageMcpServerTest {
         var req = GetPlaneTool.Request.of(
                 "/tmp/test.czi", null, null, null, null, null, null, null, null);
         assertEquals(0, req.series());
-        assertEquals(0, req.channel());
-        assertEquals(0, req.z());
-        assertEquals(0, req.timepoint());
+        assertEquals(0, req.channel().resolveSingle(4, "c"));
+        assertEquals(0, req.z().resolveSingle(4, "z"));
+        assertEquals(0, req.t().resolveSingle(4, "t"));
         assertTrue(req.normalize());
         assertNull(req.maxSize());
     }
 
     @Test
     void getIntensityStatsDefaultsApplied() {
-        var req = GetIntensityStatsTool.Request.of(
-                "/tmp/test.czi", null, null, null, null, null, null, null);
+        var req = GetIntensityStatsTool.Request.of("/tmp/test.czi");
         assertEquals(0, req.series());
-        assertNull(req.channels());
-        assertNull(req.zRange());
-        assertNull(req.tRange());
+        assertTrue(req.channels().isAll());
+        assertTrue(req.z().isAll());
+        assertTrue(req.t().isAll());
         assertEquals(256, req.histogramBins());
     }
 
     @Test
     void exportToTiffDefaultsApplied() {
         var req = ExportToTiffTool.Request.of(
-                "/tmp/in.czi", "/tmp/out.ome.tiff",
-                null, null, null, null, null, null,
-                null, null, null, null);
+                "/tmp/in.czi", "/tmp/out.ome.tiff");
         assertNull(req.series());
-        assertNull(req.channels());
+        assertTrue(req.channels().isAll());
+        assertTrue(req.z().isAll());
+        assertTrue(req.t().isAll());
         assertEquals(Compression.NONE, req.compression());
         assertEquals(MetadataMode.ALL, req.metadataMode());
     }
@@ -175,9 +174,7 @@ class BioImageMcpServerTest {
         // Single channel, single z
         var req = GetIntensityStatsTool.Request.of(
                 file.toString(), null,
-                GetIntensityStatsTool.Range.of(0),
-                GetIntensityStatsTool.Range.of(0),
-                GetIntensityStatsTool.Range.of(0),
+                Slice.single(0), Slice.single(0), Slice.single(0),
                 null, null, null);
         var result = GetIntensityStatsTool.execute(
                 req, PathValidator.allowAll(), fakeReader());

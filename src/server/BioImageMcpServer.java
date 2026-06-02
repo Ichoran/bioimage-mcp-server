@@ -365,13 +365,13 @@ public class BioImageMcpServer {
                         + "'max_intensity': max across all Z. "
                         + "'sum': sum across all Z."));
         props.put("channels", Map.of(
-                "type", "array",
-                "items", Map.of("type", "integer"),
-                "description", "Which channels to include (default: all). "
-                        + "Zero-based indices."));
-        props.put("timepoint", Map.of(
+                "type", "string",
+                "description", "Channel selection to composite (required). "
+                        + SLICE_DESC));
+        props.put("t", Map.of(
                 "type", "integer",
-                "description", "Zero-based timepoint index (default: 0)"));
+                "description", "Zero-based timepoint index (default: 0; "
+                        + "negative counts from the end)"));
         props.put("max_size", Map.of(
                 "type", "integer",
                 "description", "Maximum dimension in pixels for the output "
@@ -384,7 +384,7 @@ public class BioImageMcpServer {
                 "description", "Approximate cap on raw pixel bytes to read "
                         + "(default: 512 MB)"));
         return new McpSchema.JsonSchema(
-                "object", props, List.of("path"), false, null, null);
+                "object", props, List.of("path", "channels"), false, null, null);
     }
 
     private static McpSchema.JsonSchema getPlaneSchema() {
@@ -397,13 +397,16 @@ public class BioImageMcpServer {
                 "description", "Zero-based series index (default: 0)"));
         props.put("channel", Map.of(
                 "type", "integer",
-                "description", "Zero-based channel index (default: 0)"));
-        props.put("z_slice", Map.of(
+                "description", "Zero-based channel index (default: 0; "
+                        + "negative counts from the end)"));
+        props.put("z", Map.of(
                 "type", "integer",
-                "description", "Zero-based Z-slice index (default: 0)"));
-        props.put("timepoint", Map.of(
+                "description", "Zero-based Z-slice index (default: 0; "
+                        + "negative counts from the end)"));
+        props.put("t", Map.of(
                 "type", "integer",
-                "description", "Zero-based timepoint index (default: 0)"));
+                "description", "Zero-based timepoint index (default: 0; "
+                        + "negative counts from the end)"));
         props.put("normalize", Map.of(
                 "type", "boolean",
                 "description", "If true (default), auto-contrast via percentile "
@@ -424,6 +427,15 @@ public class BioImageMcpServer {
                 "object", props, List.of("path"), false, null, null);
     }
 
+    /** Shared description of the slice-selection grammar (snake_case-free). */
+    private static final String SLICE_DESC =
+            "A slice selection in Python style: a single index ('9', or '-1' "
+            + "for the last), a half-open range ('2:4' = indices 2,3; '5:' = "
+            + "5 to end; ':-3' = all but the last 3; ':' = all), or a "
+            + "comma-separated list ('0,2,5' or '4:9,11:'). Explicit bounds "
+            + "past the end are an error (no silent clamping); an empty "
+            + "selection is an error.";
+
     private static McpSchema.JsonSchema getIntensityStatsSchema() {
         var props = new LinkedHashMap<String, Object>();
         props.put("path", Map.of(
@@ -432,58 +444,18 @@ public class BioImageMcpServer {
         props.put("series", Map.of(
                 "type", "integer",
                 "description", "Zero-based series index (default: 0)"));
-        props.put("channel", Map.of(
-                "type", "integer",
-                "description", "Specific channel to analyze (default: all channels). "
-                        + "Negative values count from the end (-1 = last). "
-                        + "Cannot be used together with channel_start/channel_end."));
-        props.put("channel_start", Map.of(
-                "type", "integer",
-                "description", "First channel, inclusive (default: 0). "
-                        + "Negative values count from the end (-1 = last). "
-                        + "Use with channel_end for a range. "
-                        + "Cannot be used together with channel."));
-        props.put("channel_end", Map.of(
-                "type", "integer",
-                "description", "Last channel, inclusive (default: -1, i.e. last). "
-                        + "Negative values count from the end (-1 = last). "
-                        + "Use with channel_start for a range. "
-                        + "Cannot be used together with channel."));
-        props.put("z_slice", Map.of(
-                "type", "integer",
-                "description", "Specific Z-slice (default: adaptive across all Z). "
-                        + "Negative values count from the end (-1 = last). "
-                        + "Cannot be used together with z_start/z_end."));
-        props.put("z_start", Map.of(
-                "type", "integer",
-                "description", "First Z-slice, inclusive (default: 0). "
-                        + "Negative values count from the end (-1 = last). "
-                        + "Use with z_end for a range. "
-                        + "Cannot be used together with z_slice."));
-        props.put("z_end", Map.of(
-                "type", "integer",
-                "description", "Last Z-slice, inclusive (default: -1, i.e. last). "
-                        + "Negative values count from the end (-1 = last). "
-                        + "Use with z_start for a range. "
-                        + "Cannot be used together with z_slice."));
-        props.put("timepoint", Map.of(
-                "type", "integer",
-                "description", "Specific timepoint (default: adaptive across all T, "
-                        + "starting from timepoint 0). "
-                        + "Negative values count from the end (-1 = last). "
-                        + "Cannot be used together with t_start/t_end."));
-        props.put("t_start", Map.of(
-                "type", "integer",
-                "description", "First timepoint, inclusive (default: 0). "
-                        + "Negative values count from the end (-1 = last). "
-                        + "Use with t_end for a range. "
-                        + "Cannot be used together with timepoint."));
-        props.put("t_end", Map.of(
-                "type", "integer",
-                "description", "Last timepoint, inclusive (default: -1, i.e. last). "
-                        + "Negative values count from the end (-1 = last). "
-                        + "Use with t_start for a range. "
-                        + "Cannot be used together with timepoint."));
+        props.put("channels", Map.of(
+                "type", "string",
+                "description", "Channel selection (required). " + SLICE_DESC));
+        props.put("z", Map.of(
+                "type", "string",
+                "description", "Z-slice selection (required). " + SLICE_DESC
+                        + " Use ':' to read all Z adaptively within the budget."));
+        props.put("t", Map.of(
+                "type", "string",
+                "description", "Timepoint selection (required). " + SLICE_DESC
+                        + " Use ':' to read all timepoints adaptively within "
+                        + "the budget."));
         props.put("histogram_bins", Map.of(
                 "type", "integer",
                 "description", "Number of histogram bins (default: 256)"));
@@ -495,7 +467,8 @@ public class BioImageMcpServer {
                 "description", "Approximate cap on raw pixel bytes to read "
                         + "(default: 512 MB)"));
         return new McpSchema.JsonSchema(
-                "object", props, List.of("path"), false, null, null);
+                "object", props, List.of("path", "channels", "z", "t"),
+                false, null, null);
     }
 
     private static McpSchema.JsonSchema exportToTiffSchema() {
@@ -510,21 +483,16 @@ public class BioImageMcpServer {
                 "type", "integer",
                 "description", "Series to export (default: all series)"));
         props.put("channels", Map.of(
-                "type", "array",
-                "items", Map.of("type", "integer"),
-                "description", "Channel indices to include (default: all)"));
-        props.put("z_start", Map.of(
-                "type", "integer",
-                "description", "First Z-slice, inclusive (default: 0)"));
-        props.put("z_end", Map.of(
-                "type", "integer",
-                "description", "Last Z-slice, inclusive (default: last)"));
-        props.put("t_start", Map.of(
-                "type", "integer",
-                "description", "First timepoint, inclusive (default: 0)"));
-        props.put("t_end", Map.of(
-                "type", "integer",
-                "description", "Last timepoint, inclusive (default: last)"));
+                "type", "string",
+                "description", "Channel selection (required). " + SLICE_DESC));
+        props.put("z", Map.of(
+                "type", "string",
+                "description", "Z-slice selection (required); must be a single "
+                        + "contiguous range (e.g. ':' or '0:10'). " + SLICE_DESC));
+        props.put("t", Map.of(
+                "type", "string",
+                "description", "Timepoint selection (required); must be a single "
+                        + "contiguous range (e.g. ':' or '0:10'). " + SLICE_DESC));
         props.put("compression", Map.of(
                 "type", "string",
                 "enum", List.of("none", "lzw", "zlib"),
@@ -544,7 +512,7 @@ public class BioImageMcpServer {
                 "description", "Approximate cap on raw pixel bytes to "
                         + "read+write (default: 2 GB)"));
         return new McpSchema.JsonSchema(
-                "object", props, List.of("path", "output_path"),
+                "object", props, List.of("path", "output_path", "channels", "z", "t"),
                 false, null, null);
     }
 

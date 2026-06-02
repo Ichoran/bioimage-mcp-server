@@ -91,7 +91,8 @@ class GetPlaneToolTest {
                 .addSeries(FakeSeries.simple(64, 64, 1, 2, 1, PixelType.UINT16))
                 .build();
         var request = new GetPlaneTool.Request(
-                "/image.tif", 0, 1, 0, 0, true, null,
+                "/image.tif", 0, Slice.single(1), Slice.single(0),
+                Slice.single(0), true, null,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetPlaneTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -121,7 +122,8 @@ class GetPlaneToolTest {
                 .addSeries(FakeSeries.simple(256, 128, 1, 1, 1, PixelType.UINT8))
                 .build();
         var request = new GetPlaneTool.Request(
-                "/image.tif", 0, 0, 0, 0, true, 64,
+                "/image.tif", 0, Slice.single(0), Slice.single(0),
+                Slice.single(0), true, 64,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetPlaneTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -153,9 +155,11 @@ class GetPlaneToolTest {
                 .addSeries(FakeSeries.simple(16, 16, 1, 3, 1, PixelType.UINT8))
                 .build();
 
-        var req0 = new GetPlaneTool.Request("/img.tif", 0, 0, 0, 0, false, null,
+        var req0 = new GetPlaneTool.Request("/img.tif", 0, Slice.single(0),
+                Slice.single(0), Slice.single(0), false, null,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
-        var req1 = new GetPlaneTool.Request("/img.tif", 0, 1, 0, 0, false, null,
+        var req1 = new GetPlaneTool.Request("/img.tif", 0, Slice.single(1),
+                Slice.single(0), Slice.single(0), false, null,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
 
         var r0 = GetPlaneTool.execute(req0, PathValidator.allowAll(), factory);
@@ -181,31 +185,34 @@ class GetPlaneToolTest {
     void channelOutOfRange() {
         // Series has 1 channel, request channel 5
         var request = new GetPlaneTool.Request(
-                "/image.tif", 0, 5, 0, 0, true, null,
+                "/image.tif", 0, Slice.single(5), Slice.single(0),
+                Slice.single(0), true, null,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetPlaneTool.execute(
                 request, PathValidator.allowAll(), simpleFactory());
-        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "channel");
+        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "out of range");
     }
 
     @Test
     void zOutOfRange() {
         var request = new GetPlaneTool.Request(
-                "/image.tif", 0, 0, 99, 0, true, null,
+                "/image.tif", 0, Slice.single(0), Slice.single(99),
+                Slice.single(0), true, null,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetPlaneTool.execute(
                 request, PathValidator.allowAll(), simpleFactory());
-        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "z");
+        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "out of range");
     }
 
     @Test
     void timepointOutOfRange() {
         var request = new GetPlaneTool.Request(
-                "/image.tif", 0, 0, 0, 99, true, null,
+                "/image.tif", 0, Slice.single(0), Slice.single(0),
+                Slice.single(99), true, null,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetPlaneTool.execute(
                 request, PathValidator.allowAll(), simpleFactory());
-        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "timepoint");
+        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "out of range");
     }
 
     @Test
@@ -215,7 +222,8 @@ class GetPlaneToolTest {
                 .build();
         // 1024*1024*2 = 2MB, budget is 1MB
         var request = new GetPlaneTool.Request(
-                "/image.tif", 0, 0, 0, 0, true, null,
+                "/image.tif", 0, Slice.single(0), Slice.single(0),
+                Slice.single(0), true, null,
                 Duration.ofSeconds(5), 1024 * 1024);
         var result = GetPlaneTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -223,10 +231,23 @@ class GetPlaneToolTest {
     }
 
     @Test
-    void negativeChannelRejectedByRequest() {
-        assertThrows(IllegalArgumentException.class,
-                () -> GetPlaneTool.Request.of("/img.tif", null, -1,
-                        null, null, null, null, null, null));
+    void negativeChannelResolvesFromEnd() {
+        // A 3-channel image: channel -1 == channel 2.
+        Supplier<ImageReader> factory = () -> FakeImageReader.builder()
+                .addSeries(FakeSeries.simple(16, 16, 1, 3, 1, PixelType.UINT8))
+                .build();
+        var last = new GetPlaneTool.Request("/img.tif", 0, Slice.single(-1),
+                Slice.single(0), Slice.single(0), false, null,
+                Duration.ofSeconds(5), 256L * 1024 * 1024);
+        var two = new GetPlaneTool.Request("/img.tif", 0, Slice.single(2),
+                Slice.single(0), Slice.single(0), false, null,
+                Duration.ofSeconds(5), 256L * 1024 * 1024);
+        var rLast = GetPlaneTool.execute(last, PathValidator.allowAll(), factory);
+        var rTwo = GetPlaneTool.execute(two, PathValidator.allowAll(), factory);
+        assertSuccess(rLast, pngLast ->
+            assertSuccess(rTwo, pngTwo ->
+                assertArrayEquals(pngTwo, pngLast,
+                        "channel -1 should equal the last channel")));
     }
 
     // ---- encodePng / downsample directly ----
@@ -276,7 +297,8 @@ class GetPlaneToolTest {
                                     int z, int timepoint, boolean normalize,
                                     Integer maxSize) {
         var request = new GetPlaneTool.Request(
-                path, series, channel, z, timepoint, normalize, maxSize,
+                path, series, Slice.single(channel), Slice.single(z),
+                Slice.single(timepoint), normalize, maxSize,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         return GetPlaneTool.execute(
                 request, PathValidator.allowAll(), simpleFactory());

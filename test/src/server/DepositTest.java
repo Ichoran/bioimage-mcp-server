@@ -63,6 +63,16 @@ class DepositTest {
         return (int) ((long) y * X + x + c * 7L + z * 13L + t * 31L) & 0xFF;
     }
 
+    /** Base deposit args selecting the whole volume (all channels/z/t). */
+    private static Map<String, Object> argsFor(Path src) {
+        var a = new LinkedHashMap<String, Object>();
+        a.put("path", src.toString());
+        a.put("channels", ":");
+        a.put("z", ":");
+        a.put("t", ":");
+        return a;
+    }
+
     @Test
     void depositWritesExpectedBytesInTZCYXOrder(@TempDir Path dir) throws Exception {
         var service = serviceFor(dir, C);
@@ -70,8 +80,7 @@ class DepositTest {
         long total = (long) X * Y * Z * C * T;          // uint8 ⇒ 1 byte/sample
         var tgt = region(dir, "shm.bin", total);
 
-        var args = new LinkedHashMap<String, Object>();
-        args.put("path", src.toString());
+        var args = argsFor(src);
         args.put("target", target(tgt, total));
 
         var result = service.deposit(args);
@@ -113,8 +122,7 @@ class DepositTest {
         long total = (long) X * Y * Z * sc * T;
         var tgt = region(dir, "shm.bin", total);
 
-        var args = new LinkedHashMap<String, Object>();
-        args.put("path", src.toString());
+        var args = argsFor(src);
         args.put("target", target(tgt, total));   // no channel arg ⇒ all channels
 
         var d = assertSuccess(service.deposit(args));
@@ -140,8 +148,7 @@ class DepositTest {
         var src = touch(dir, "src.fake");
         var tgt = region(dir, "shm.bin", 4);   // deliberately too small
 
-        var args = new LinkedHashMap<String, Object>();
-        args.put("path", src.toString());
+        var args = argsFor(src);
         args.put("dry_run", true);
 
         var d = assertSuccess(service.deposit(args));
@@ -159,8 +166,7 @@ class DepositTest {
         long total = (long) X * Y * Z * C * T;
         var tgt = region(dir, "shm.bin", total);   // physically big enough...
 
-        var args = new LinkedHashMap<String, Object>();
-        args.put("path", src.toString());
+        var args = argsFor(src);
         args.put("target", target(tgt, total - 1));   // ...but declared capacity short
 
         var f = assertFailure(service.deposit(args));
@@ -177,8 +183,7 @@ class DepositTest {
         try {
             long total = (long) X * Y * Z * C * T;
             var tgt = region(dir, "shm.bin", total);
-            var args = new LinkedHashMap<String, Object>();
-            args.put("path", outside.toString());
+            var args = argsFor(outside);
             args.put("target", target(tgt, total));
 
             var f = assertFailure(service.deposit(args));

@@ -41,79 +41,6 @@ public final class GetIntensityStatsTool {
     static final double BUDGET_CONFIDENCE = 0.90;
 
     /**
-     * An inclusive range of indices.  A null Range means "use the
-     * default" (which varies by dimension — all channels, all Z,
-     * timepoint 0).  A Range with start == end selects a single index.
-     *
-     * @param start first index (inclusive, zero-based)
-     * @param end   last index (inclusive, zero-based)
-     */
-    /**
-     * An inclusive index range.  Indices may be negative to count from
-     * the end of the dimension: {@code -1} is the last element,
-     * {@code -2} is the second-to-last, etc.  Call {@link #resolve(int, String)}
-     * to convert to absolute non-negative indices against a known
-     * dimension size.
-     *
-     * @param start first index (inclusive; negative counts from end)
-     * @param end   last index (inclusive; negative counts from end)
-     */
-    public record Range(int start, int end) {
-
-        /** Convenience for a single index. */
-        public static Range of(int index) { return new Range(index, index); }
-
-        /** Convenience for a range. */
-        public static Range of(int start, int end) {
-            return new Range(start, end);
-        }
-
-        /**
-         * Resolve negative indices against a known dimension size and
-         * validate.  Returns a new {@code Range} with non-negative,
-         * in-bounds indices.
-         *
-         * @param size the dimension size (e.g. sizeZ)
-         * @param dimensionName for error messages (e.g. "Z-slice")
-         * @throws IllegalArgumentException if the resolved range is
-         *         out of bounds or start &gt; end after resolution
-         */
-        public Range resolve(int size, String dimensionName) {
-            int s = start < 0 ? size + start : start;
-            int e = end < 0 ? size + end : end;
-            if (s < 0 || s >= size) {
-                throw new IllegalArgumentException(
-                        dimensionName + " range start " + start
-                        + " resolves to " + s + ", out of range for "
-                        + size + " " + dimensionName + "(s)");
-            }
-            if (e < 0 || e >= size) {
-                throw new IllegalArgumentException(
-                        dimensionName + " range end " + end
-                        + " resolves to " + e + ", out of range for "
-                        + size + " " + dimensionName + "(s)");
-            }
-            if (s > e) {
-                throw new IllegalArgumentException(
-                        dimensionName + " range start " + start
-                        + " (resolved: " + s + ") is greater than end "
-                        + end + " (resolved: " + e + ")");
-            }
-            return new Range(s, e);
-        }
-
-        /** Number of indices in this range. */
-        public int count() { return end - start + 1; }
-
-        /** Expand to an array of indices. */
-        int[] toArray() {
-            var arr = new int[count()];
-            for (int i = 0; i < arr.length; i++) arr[i] = start + i;
-            return arr;
-        }
-    }
-
-    /**
      * Parameters for a {@code get_intensity_stats} call.
      *
      * <p>Each dimension (channel, Z, T) accepts a nullable {@link Range}:
@@ -140,9 +67,9 @@ public final class GetIntensityStatsTool {
     public record Request(
             String path,
             int series,
-            Range channels,
-            Range zRange,
-            Range tRange,
+            Slice channels,
+            Slice z,
+            Slice t,
             int histogramBins,
             Duration timeout,
             long maxBytes) {
@@ -168,32 +95,48 @@ public final class GetIntensityStatsTool {
             if (maxBytes <= 0) {
                 throw new IllegalArgumentException("maxBytes must be positive");
             }
+            if (channels == null || z == null || t == null) {
+                throw new IllegalArgumentException(
+                        "channels, z, and t selections are required "
+                        + "(use Slice.all() for ':')");
+            }
         }
 
-        /** Full-featured factory with nullable parameters and defaults. */
+        /**
+         * Full-featured factory.  The {@code channels}/{@code z}/{@code t}
+         * selections are required; pass {@link Slice#all()} for "all".  A
+         * {@code z} or {@code t} of {@code ":"} (i.e. {@link Slice#isAll()})
+         * reads adaptively within the budget; a bounded slice reads exactly.
+         */
         public static Request of(String path, Integer series,
-                                  Range channels, Range zRange, Range tRange,
+                                  Slice channels, Slice z, Slice t,
                                   Integer histogramBins,
                                   Duration timeout, Long maxBytes) {
             return new Request(
                     path,
                     series != null ? series : 0,
                     channels,
-                    zRange,
-                    tRange,
+                    z,
+                    t,
                     histogramBins != null ? histogramBins : DEFAULT_HISTOGRAM_BINS,
                     timeout != null ? timeout : DEFAULT_TIMEOUT,
                     maxBytes != null ? maxBytes : DEFAULT_MAX_BYTES);
         }
 
-        /** Minimal: all defaults, all channels, adaptive Z and T. */
+        /** All channels, fully adaptive Z and T (every selector ":"). */
         public static Request of(String path) {
-            return of(path, null, null, null, null, null, null, null);
+            return of(path, null, Slice.all(), Slice.all(), Slice.all(),
+                    null, null, null);
         }
 
-        /** Whether Z and/or T ranges were left to defaults (adaptive). */
+        /**
+         * Whether Z and/or T are ":" and therefore read adaptively (stopping
+         * before the time/byte budget is exceeded).  A bounded slice on a
+         * dimension reads exactly that range (subsampling only if over the
+         * byte budget).
+         */
         boolean isAdaptive() {
-            return zRange == null || tRange == null;
+            return z.isAll() || t.isAll();
         }
     }
 
@@ -214,15 +157,18 @@ public final class GetIntensityStatsTool {
      */
     public record StatsResult(
             List<IntensityStats> perChannel,
-            Range channels,
-            Range zRange,
-            Range tRange,
+            int[] channels,
+            int[] zRequested,
+            int[] tRequested,
             int[] zSlicesUsed,
             int[] timepointsUsed,
             PixelType pixelType) {
 
         public StatsResult {
             perChannel = List.copyOf(perChannel);
+            channels = channels.clone();
+            zRequested = zRequested.clone();
+            tRequested = tRequested.clone();
             zSlicesUsed = zSlicesUsed.clone();
             timepointsUsed = timepointsUsed.clone();
         }
@@ -258,20 +204,17 @@ public final class GetIntensityStatsTool {
                         request.series(), DetailLevel.SUMMARY);
                 var si = meta.detailedSeries();
 
-                // Resolve channel range (always fully resolved)
-                Range channelRange = resolveChannelRange(
-                        request.channels(), si);
-                int[] channelIndices = channelRange.toArray();
+                // Resolve the selections to concrete indices.  Channels and
+                // bounded Z/T may be any list (e.g. "0,2", "4:9,11:").
+                int[] channelIndices =
+                        request.channels().resolve(si.sizeC(), "channels");
 
-                // Full Z and T ranges (what the series offers)
-                Range fullZ = new Range(0, si.sizeZ() - 1);
-                Range fullT = new Range(0, si.sizeT() - 1);
-
-                // Resolve explicit ranges (validate bounds)
-                Range requestedZ = request.zRange() != null
-                        ? validateZRange(request.zRange(), si) : fullZ;
-                Range requestedT = request.tRange() != null
-                        ? validateTRange(request.tRange(), si) : fullT;
+                // ":" → adaptive over the whole dimension; a bounded slice is
+                // resolved and read exactly.
+                int[] requestedZ = request.z().isAll()
+                        ? intRange(si.sizeZ()) : request.z().resolve(si.sizeZ(), "z");
+                int[] requestedT = request.t().isAll()
+                        ? intRange(si.sizeT()) : request.t().resolve(si.sizeT(), "t");
 
                 long bytesPerPlane = (long) si.sizeX() * si.sizeY()
                         * si.pixelType().bytesPerPixel();
@@ -289,19 +232,14 @@ public final class GetIntensityStatsTool {
                 ByteOrder order = reader.isLittleEndian(request.series())
                         ? ByteOrder.LITTLE_ENDIAN : ByteOrder.BIG_ENDIAN;
 
-                boolean adaptive = request.zRange() == null
-                        || request.tRange() == null;
-
-                if (adaptive) {
+                if (request.isAdaptive()) {
                     return readAdaptive(
-                            reader, request, si, channelRange,
-                            channelIndices, requestedZ, requestedT,
-                            bytesPerPlane, order);
+                            reader, request, si, channelIndices,
+                            requestedZ, requestedT, bytesPerPlane, order);
                 } else {
                     return readExplicit(
-                            reader, request, si, channelRange,
-                            channelIndices, requestedZ, requestedT,
-                            bytesPerPlane, order);
+                            reader, request, si, channelIndices,
+                            requestedZ, requestedT, bytesPerPlane, order);
                 }
             }
         });
@@ -315,12 +253,8 @@ public final class GetIntensityStatsTool {
 
     private static StatsResult readExplicit(
             ImageReader reader, Request request, SeriesInfo si,
-            Range channelRange, int[] channelIndices,
-            Range zRange, Range tRange,
+            int[] channelIndices, int[] zIndices, int[] tIndices,
             long bytesPerPlane, ByteOrder order) throws IOException {
-
-        int[] zIndices = zRange.toArray();
-        int[] tIndices = tRange.toArray();
 
         long totalPlanes = (long) channelIndices.length
                 * zIndices.length * tIndices.length;
@@ -349,7 +283,7 @@ public final class GetIntensityStatsTool {
                 usedZ, usedT, accumulators, order);
 
         return buildResult(accumulators, request.histogramBins(),
-                sampled, sampledFraction, channelRange, zRange, tRange,
+                sampled, sampledFraction, channelIndices, zIndices, tIndices,
                 usedZ, usedT, si.pixelType());
     }
 
@@ -359,12 +293,9 @@ public final class GetIntensityStatsTool {
 
     private static StatsResult readAdaptive(
             ImageReader reader, Request request, SeriesInfo si,
-            Range channelRange, int[] channelIndices,
-            Range fullZ, Range fullT,
+            int[] channelIndices, int[] allZ, int[] allT,
             long bytesPerPlane, ByteOrder order) throws IOException {
 
-        int[] allZ = fullZ.toArray();
-        int[] allT = fullT.toArray();
         int nChannels = channelIndices.length;
 
         // Decide step granularity:
@@ -470,17 +401,14 @@ public final class GetIntensityStatsTool {
                     "budget too small to read even a single step");
         }
 
-        // Compute the full requested ranges for reporting
-        Range reportZ = fullZ;
-        Range reportT = fullT;
-
         long totalPlanes = (long) nChannels * allZ.length * allT.length;
         long actualPlanes = estimator.totalPlanesRead();
         boolean sampled = actualPlanes < totalPlanes;
         double sampledFraction = (double) actualPlanes / totalPlanes;
 
+        // Report the full requested extent (allZ/allT) vs what was used.
         return buildResult(accumulators, request.histogramBins(),
-                sampled, sampledFraction, channelRange, reportZ, reportT,
+                sampled, sampledFraction, channelIndices, allZ, allT,
                 usedZ, usedT, si.pixelType());
     }
 
@@ -517,32 +445,22 @@ public final class GetIntensityStatsTool {
     private static StatsResult buildResult(
             StatsAccumulator[] accumulators, int histogramBins,
             boolean sampled, double sampledFraction,
-            Range channelRange, Range zRange, Range tRange,
+            int[] channels, int[] zRequested, int[] tRequested,
             int[] usedZ, int[] usedT, PixelType pixelType) {
         var perChannel = new ArrayList<IntensityStats>(accumulators.length);
         for (var acc : accumulators) {
             perChannel.add(acc.finish(histogramBins, sampled, sampledFraction));
         }
         return new StatsResult(
-                perChannel, channelRange, zRange, tRange,
+                perChannel, channels, zRequested, tRequested,
                 usedZ, usedT, pixelType);
     }
 
-    // ---- Range resolution ----
-
-    static Range resolveChannelRange(Range requested, SeriesInfo si) {
-        if (requested == null) {
-            return new Range(0, si.sizeC() - 1);
-        }
-        return requested.resolve(si.sizeC(), "channel");
-    }
-
-    private static Range validateZRange(Range requested, SeriesInfo si) {
-        return requested.resolve(si.sizeZ(), "Z-slice");
-    }
-
-    private static Range validateTRange(Range requested, SeriesInfo si) {
-        return requested.resolve(si.sizeT(), "timepoint");
+    /** The indices {@code [0, n)} as an array. */
+    private static int[] intRange(int n) {
+        var arr = new int[n];
+        for (int i = 0; i < n; i++) arr[i] = i;
+        return arr;
     }
 
     // ---- Subsampling ----
