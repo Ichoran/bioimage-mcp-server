@@ -1,6 +1,6 @@
 extends: [JavaModule, PublishModule]
 
-publishVersion: 0.1.2
+publishVersion: 0.2.0
 
 artifactName: bioimage_mcp_server
 pomSettings:
