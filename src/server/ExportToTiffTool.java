@@ -57,11 +57,9 @@ public final class ExportToTiffTool {
      * @param inputPath     path to the source image file
      * @param outputPath    path for the output OME-TIFF file
      * @param series        series to export (null = all)
-     * @param channels      channel indices to include (null = all)
-     * @param zStart        first Z-slice (inclusive, null = 0)
-     * @param zEnd          last Z-slice (inclusive, null = sizeZ-1)
-     * @param tStart        first timepoint (inclusive, null = 0)
-     * @param tEnd          last timepoint (inclusive, null = sizeT-1)
+     * @param channels      channel selection (slice)
+     * @param z             Z-slice selection (slice; must resolve to one contiguous range)
+     * @param t             timepoint selection (slice; must resolve to one contiguous range)
      * @param compression   output compression
      * @param metadataMode  how much metadata to preserve
      * @param timeout       wall-clock time limit

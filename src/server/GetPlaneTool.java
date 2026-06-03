@@ -33,9 +33,9 @@ public final class GetPlaneTool {
      *
      * @param path             path to the image file
      * @param series           zero-based series index
-     * @param channel          zero-based channel index
-     * @param z                zero-based Z-slice index
-     * @param timepoint        zero-based timepoint index
+     * @param channel          channel selection (single-index slice)
+     * @param z                Z-slice selection (single-index slice)
+     * @param t                timepoint selection (single-index slice)
      * @param normalize        if true, auto-contrast via percentile stretch;
      *                         if false, map the full type range to 0–255
      * @param maxSize          if non-null, downsample so the largest

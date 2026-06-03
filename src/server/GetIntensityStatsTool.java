@@ -57,9 +57,9 @@ public final class GetIntensityStatsTool {
      *
      * @param path           path to the image file
      * @param series         zero-based series index
-     * @param channels       channel range, or null for all
-     * @param zRange         Z-slice range, or null for adaptive
-     * @param tRange         timepoint range, or null for adaptive
+     * @param channels       channel selection (slice)
+     * @param z              Z-slice selection (slice); ":" reads adaptively
+     * @param t              timepoint selection (slice); ":" reads adaptively
      * @param histogramBins  number of bins for the output histogram
      * @param timeout        wall-clock time limit
      * @param maxBytes       approximate cap on raw pixel bytes to read
@@ -146,11 +146,9 @@ public final class GetIntensityStatsTool {
      * exactly what "all" resolved to.
      *
      * @param perChannel   one {@link IntensityStats} per channel
-     * @param channels     the channels that were computed (inclusive range)
-     * @param zRange       the Z-slices included (inclusive range, before
-     *                     any subsampling)
-     * @param tRange       the timepoints included (inclusive range, before
-     *                     any subsampling)
+     * @param channels     the channels that were computed
+     * @param zRequested   the Z-slices requested (before any subsampling)
+     * @param tRequested   the timepoints requested (before any subsampling)
      * @param zSlicesUsed  actual Z-slice indices read (may be subsampled)
      * @param timepointsUsed actual timepoint indices read (may be subsampled)
      * @param pixelType    the pixel type of the series
