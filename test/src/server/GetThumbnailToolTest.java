@@ -58,7 +58,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(16, 16, 1, 1, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, null, 0, 1024,
+                "/img.tif", 0, Projection.MID_SLICE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -95,7 +95,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(8, 8, 4, 1, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, null, 0, 1024,
+                "/img.tif", 0, Projection.MID_SLICE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -110,10 +110,10 @@ class GetThumbnailToolTest {
                 .build();
 
         var midReq = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, null, 0, 1024,
+                "/img.tif", 0, Projection.MID_SLICE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var maxReq = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MAX_INTENSITY, null, 0, 1024,
+                "/img.tif", 0, Projection.MAX_INTENSITY, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
 
         var midResult = GetThumbnailTool.execute(
@@ -145,10 +145,10 @@ class GetThumbnailToolTest {
                 .build();
 
         var sumReq = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.SUM, null, 0, 1024,
+                "/img.tif", 0, Projection.SUM, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var maxReq = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MAX_INTENSITY, null, 0, 1024,
+                "/img.tif", 0, Projection.MAX_INTENSITY, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
 
         var sumResult = GetThumbnailTool.execute(
@@ -175,7 +175,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(16, 16, 5, 2, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                "/img.tif", 0, Projection.ADAPTIVE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -195,7 +195,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(32, 32, 10, 3, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                "/img.tif", 0, Projection.ADAPTIVE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 3200);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -214,7 +214,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(16, 16, 1, 2, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                "/img.tif", 0, Projection.ADAPTIVE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -233,10 +233,10 @@ class GetThumbnailToolTest {
                 .build();
 
         var adaptiveReq = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                "/img.tif", 0, Projection.ADAPTIVE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var explicitReq = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MAX_INTENSITY, null, 0, 1024,
+                "/img.tif", 0, Projection.MAX_INTENSITY, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
 
         var adaptiveResult = GetThumbnailTool.execute(
@@ -269,7 +269,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(16, 16, 1, 2, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, null, 0, 1024,
+                "/img.tif", 0, Projection.MID_SLICE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -300,10 +300,11 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(16, 16, 1, 3, 1, PixelType.UINT8))
                 .build();
         var allReq = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, null, 0, 1024,
+                "/img.tif", 0, Projection.MID_SLICE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var subReq = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, new int[] { 1 }, 0, 1024,
+                "/img.tif", 0, Projection.MID_SLICE,
+                Slice.parse("1", "channels"), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
 
         var allResult = GetThumbnailTool.execute(
@@ -329,7 +330,7 @@ class GetThumbnailToolTest {
                         List.of(redChannel), null, null, java.util.Map.of()))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, null, 0, 1024,
+                "/img.tif", 0, Projection.MID_SLICE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -365,7 +366,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(256, 128, 1, 1, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, null, 0, 64,
+                "/img.tif", 0, Projection.MID_SLICE, Slice.all(), 0, 64,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -383,7 +384,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(32, 32, 1, 1, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, null, 0, 1024,
+                "/img.tif", 0, Projection.MID_SLICE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -405,7 +406,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(32, 32, 3, 2, 1, PixelType.UINT16))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MAX_INTENSITY, null, 0, 1024,
+                "/img.tif", 0, Projection.MAX_INTENSITY, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -526,11 +527,11 @@ class GetThumbnailToolTest {
     @Test
     void channelOutOfRange() {
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, new int[] { 5 },
+                "/img.tif", 0, Projection.MID_SLICE, Slice.parse("5", "channels"),
                 0, 1024, Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), simpleFactory());
-        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "channel");
+        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "out of range");
     }
 
     @Test
@@ -539,7 +540,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(16, 16, 1, 1, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MID_SLICE, null, 99, 1024,
+                "/img.tif", 0, Projection.MID_SLICE, Slice.all(), 99, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -554,7 +555,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(64, 64, 5, 3, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.MAX_INTENSITY, null, 0, 1024,
+                "/img.tif", 0, Projection.MAX_INTENSITY, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 1000);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -570,7 +571,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(64, 64, 5, 3, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                "/img.tif", 0, Projection.ADAPTIVE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 15000);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -589,7 +590,7 @@ class GetThumbnailToolTest {
                 .addSeries(FakeSeries.simple(64, 64, 5, 3, 1, PixelType.UINT8))
                 .build();
         var request = new GetThumbnailTool.Request(
-                "/img.tif", 0, Projection.ADAPTIVE, null, 0, 1024,
+                "/img.tif", 0, Projection.ADAPTIVE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 1000);
         var result = GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), factory);
@@ -597,20 +598,10 @@ class GetThumbnailToolTest {
     }
 
     @Test
-    void emptyChannelsArrayRejectedByRequest() {
+    void emptySliceSelectionRejected() {
+        // An empty selection string is rejected at parse time.
         assertThrows(IllegalArgumentException.class,
-                () -> new GetThumbnailTool.Request(
-                        "/img.tif", 0, Projection.MID_SLICE, new int[0],
-                        0, 1024, Duration.ofSeconds(5), 256L * 1024 * 1024));
-    }
-
-    @Test
-    void negativeChannelRejectedByRequest() {
-        assertThrows(IllegalArgumentException.class,
-                () -> new GetThumbnailTool.Request(
-                        "/img.tif", 0, Projection.MID_SLICE,
-                        new int[] { -1 },
-                        0, 1024, Duration.ofSeconds(5), 256L * 1024 * 1024));
+                () -> Slice.parse("", "channels"));
     }
 
     // ================================================================
@@ -649,7 +640,7 @@ class GetThumbnailToolTest {
 
     private ToolResult<ThumbnailResult> runSimple(String path) {
         var request = new GetThumbnailTool.Request(
-                path, 0, Projection.MID_SLICE, null, 0, 1024,
+                path, 0, Projection.MID_SLICE, Slice.all(), 0, 1024,
                 Duration.ofSeconds(5), 256L * 1024 * 1024);
         return GetThumbnailTool.execute(
                 request, PathValidator.allowAll(), simpleFactory());

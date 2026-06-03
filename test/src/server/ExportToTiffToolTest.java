@@ -95,7 +95,7 @@ class ExportToTiffToolTest {
         var writer = new FakeImageWriter();
         var request = new ExportToTiffTool.Request(
                 "/input.tif", "/output.ome.tif",
-                null, null, null, null, null, null,
+                null, Slice.all(), Slice.all(), Slice.all(),
                 Compression.LZW, MetadataMode.ALL,
                 TIMEOUT, MAX_BYTES);
         ExportToTiffTool.execute(
@@ -354,43 +354,43 @@ class ExportToTiffToolTest {
     void channelOutOfRange() {
         var request = new ExportToTiffTool.Request(
                 "/in.tif", "/out.ome.tif",
-                null, new int[] { 5 }, null, null, null, null,
+                null, Slice.parse("5", "channels"), Slice.all(), Slice.all(),
                 Compression.NONE, MetadataMode.ALL, TIMEOUT, MAX_BYTES);
         var result = ExportToTiffTool.execute(
                 request, PathValidator.allowAll(),
                 simpleReader(2, 1, 1), FakeImageWriter::new);
-        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "channel");
+        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "out of range");
     }
 
     @Test
     void zOutOfRange() {
         var request = new ExportToTiffTool.Request(
                 "/in.tif", "/out.ome.tif",
-                null, null, null, 99, null, null,
+                null, Slice.all(), Slice.parse("0:100", "z"), Slice.all(),
                 Compression.NONE, MetadataMode.ALL, TIMEOUT, MAX_BYTES);
         var result = ExportToTiffTool.execute(
                 request, PathValidator.allowAll(),
                 simpleReader(1, 5, 1), FakeImageWriter::new);
-        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "zEnd");
+        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "out of range");
     }
 
     @Test
     void tOutOfRange() {
         var request = new ExportToTiffTool.Request(
                 "/in.tif", "/out.ome.tif",
-                null, null, null, null, null, 99,
+                null, Slice.all(), Slice.all(), Slice.parse("0:100", "t"),
                 Compression.NONE, MetadataMode.ALL, TIMEOUT, MAX_BYTES);
         var result = ExportToTiffTool.execute(
                 request, PathValidator.allowAll(),
                 simpleReader(1, 1, 3), FakeImageWriter::new);
-        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "tEnd");
+        assertFailure(result, ErrorKind.INVALID_ARGUMENT, "out of range");
     }
 
     @Test
     void seriesOutOfRange() {
         var request = new ExportToTiffTool.Request(
                 "/in.tif", "/out.ome.tif",
-                5, null, null, null, null, null,
+                5, Slice.all(), Slice.all(), Slice.all(),
                 Compression.NONE, MetadataMode.ALL, TIMEOUT, MAX_BYTES);
         var result = ExportToTiffTool.execute(
                 request, PathValidator.allowAll(),
@@ -403,7 +403,7 @@ class ExportToTiffToolTest {
         // 16×16 uint8 × 3 ch × 5 Z × 2 T = 7680 bytes, budget 1000
         var request = new ExportToTiffTool.Request(
                 "/in.tif", "/out.ome.tif",
-                null, null, null, null, null, null,
+                null, Slice.all(), Slice.all(), Slice.all(),
                 Compression.NONE, MetadataMode.ALL, TIMEOUT, 1000);
         var result = ExportToTiffTool.execute(
                 request, PathValidator.allowAll(),
@@ -508,13 +508,34 @@ class ExportToTiffToolTest {
             MetadataMode metadataMode) {
         var request = new ExportToTiffTool.Request(
                 "/input.tif", "/output.ome.tif",
-                series, channels, zStart, zEnd, tStart, tEnd,
+                series,
+                channels == null ? Slice.all() : listSlice(channels),
+                rangeSlice(zStart, zEnd),
+                rangeSlice(tStart, tEnd),
                 Compression.NONE,
                 metadataMode != null ? metadataMode : MetadataMode.ALL,
                 TIMEOUT, MAX_BYTES);
         return ExportToTiffTool.execute(
                 request, PathValidator.allowAll(),
                 readerFactory, () -> writer);
+    }
+
+    /** Build a comma-list slice from explicit indices. */
+    private static Slice listSlice(int[] indices) {
+        var sb = new StringBuilder();
+        for (int i = 0; i < indices.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(indices[i]);
+        }
+        return Slice.parse(sb.toString(), "channels");
+    }
+
+    /** Build a slice from inclusive start/end ints (null = open); both null = ":". */
+    private static Slice rangeSlice(Integer start, Integer end) {
+        if (start == null && end == null) return Slice.all();
+        String s = (start == null ? "" : start.toString()) + ":"
+                + (end == null ? "" : Integer.toString(end + 1));
+        return Slice.parse(s, "range");
     }
 
     private static <T> void assertSuccess(

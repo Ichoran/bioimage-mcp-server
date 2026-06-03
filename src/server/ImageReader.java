@@ -123,6 +123,23 @@ public interface ImageReader extends AutoCloseable {
     }
 
     /**
+     * Returns this file's extended metadata as a format-tagged document
+     * (see {@link OmeMetadata}), or {@code null} if none is available.
+     *
+     * <p>The default derives it from {@link #getOMEXML()} as an
+     * {@code ome_xml} block — correct for every reader that provides OME-XML.
+     * A reader that can supply a native OME-NGFF (OME-Zarr) JSON block should
+     * override this to return an {@code ome_ngff}-tagged document instead.
+     *
+     * @return a tagged metadata block, or {@code null} if unavailable
+     * @throws IllegalStateException if no file is open
+     */
+    default OmeMetadata getMetadataBlock() {
+        String xml = getOMEXML();
+        return xml == null ? null : new OmeMetadata(OmeMetadata.FORMAT_OME_XML, xml);
+    }
+
+    /**
      * Returns the number of flat (key-value) metadata entries the
      * reader extracted from the source format.
      *

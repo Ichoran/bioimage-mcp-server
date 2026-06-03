@@ -1,0 +1,185 @@
+package build
+
+import mill.*
+import mill.javalib.*
+import mill.javalib.publish.*
+import mill.api.PathRef
+
+// Scala build (converted from the former build.mill.yaml).  Adds gRPC/protobuf
+// dependencies and a protoc + grpc-java code-generation task whose toolchain is
+// fetched from Maven (no system protoc required).
+object `package` extends JavaModule with PublishModule {
+
+  def publishVersion = "0.2.0"
+  def artifactName = "bioimage_mcp_server"
+
+  def jvmVersion = "21"
+
+  // Extra repository appended to the defaults (Maven Central is implicit).
+  def repositories = Seq(
+    "https://artifacts.openmicroscopy.org/artifactory/maven/"
+  )
+
+  // Disable the shell/batch launcher that Mill prepends to assembly jars.
+  // The prefixed bytes make the jar unreadable by javac on JDK < 25
+  // (ZipException), which breaks JBang's --cp flag and similar tooling.
+  def prependShellScript = ""
+
+  def pomSettings = PomSettings(
+    description =
+      "MCP server giving LLM agents access to microscopy image data via Bio-Formats",
+    organization = "com.github.ichoran",
+    url = "https://github.com/ichoran/bioimage-mcp-server",
+    licenses = Seq(License.`GPL-3.0-only`),
+    versionControl = VersionControl.github("ichoran", "bioimage-mcp-server"),
+    developers = Seq(Developer("ichoran", "Rex Kerr", "", email = "ichoran@gmail.com"))
+  )
+
+  // gRPC-Java 1.81.0 declares a hard dependency on protobuf-java 3.25.8.  The
+  // protoc compiler MUST match protobuf-java, and protoc-gen-grpc-java MUST
+  // match the grpc-java runtime — keep these three in lockstep.
+  val grpcVersion = "1.81.0"
+  val protobufVersion = "3.25.8"
+  // buf CLI — published to Maven Central as build.buf:buf with the SAME
+  // OS/arch classifier scheme as protoc, so protocClassifier() works for it too.
+  val bufVersion = "1.63.0"
+
+  def mvnDeps = Seq(
+    mvn"ome:formats-gpl:8.4.0",
+    mvn"io.modelcontextprotocol.sdk:mcp:1.1.0",
+    mvn"com.tdunning:t-digest:3.3",
+    mvn"org.apache.commons:commons-math3:3.6.1",
+    mvn"org.apache.commons:commons-text:1.13.0",
+    mvn"commons-cli:commons-cli:1.11.0",
+    mvn"org.slf4j:slf4j-simple:2.0.16",
+    // gRPC-Java runtime + protobuf runtime (the generated *Grpc.java and
+    // protobuf message classes need these at compile time).
+    mvn"io.grpc:grpc-netty-shaded:$grpcVersion",
+    mvn"io.grpc:grpc-protobuf:$grpcVersion",
+    mvn"io.grpc:grpc-stub:$grpcVersion",
+    mvn"com.google.protobuf:protobuf-java:$protobufVersion",
+    // Provides javax.annotation.Generated, referenced by grpc-generated stubs
+    // but absent on JDK 21.  jakarta.annotation does NOT satisfy it (the
+    // generated code names the javax.annotation package specifically).
+    mvn"org.apache.tomcat:annotations-api:6.0.53"
+  )
+
+  // ================================================================
+  // protoc + grpc-java code generation
+  // ================================================================
+
+  /** Directory holding the .proto source files. */
+  def protoDir = Task.Source(moduleDir / "src" / "proto")
+
+  /**
+   * The Maven os-maven-plugin OS/arch classifier used by the protoc and
+   * protoc-gen-grpc-java executable artifacts (e.g. linux-x86_64,
+   * osx-aarch_64, windows-x86_64).  Note the underscore in aarch_64.
+   */
+  def protocClassifier: Task[String] = Task {
+    val osName = System.getProperty("os.name").toLowerCase
+    val os =
+      if (osName.contains("mac") || osName.contains("darwin")) "osx"
+      else if (osName.contains("win")) "windows"
+      else "linux"
+    val arch = System.getProperty("os.arch").toLowerCase match {
+      case "x86_64" | "amd64" => "x86_64"
+      case "aarch64" | "arm64" => "aarch_64"
+      case "x86" | "i386" | "i686" => "x86_32"
+      case other =>
+        sys.error(s"Unsupported os.arch '$other' for protoc artifact resolution")
+    }
+    s"$os-$arch"
+  }
+
+  /**
+   * Copy an OS-classified executable artifact (already resolved from Maven)
+   * out of the read-only coursier cache and mark it executable.
+   * `artifactTypes` must include `exe` at resolution time — coursier's default
+   * type filter drops exe artifacts.
+   */
+  private def stageExe(
+      resolver: CoursierModule.Resolver, coord: String, dst: os.Path)(implicit
+      ctx: mill.api.TaskCtx): PathRef = {
+    val resolved = resolver.classpath(
+      Seq(mvn"$coord"),
+      artifactTypes = Some(Set(coursier.core.Type("exe")))
+    )
+    os.copy.over(resolved.head.path, dst)
+    os.perms.set(dst, "rwxr-xr-x")
+    PathRef(dst)
+  }
+
+  def protocExe: Task[PathRef] = Task {
+    stageExe(
+      defaultResolver(),
+      s"com.google.protobuf:protoc:$protobufVersion;classifier=${protocClassifier()};type=exe",
+      Task.dest / "protoc")
+  }
+
+  def protocGenGrpcJavaExe: Task[PathRef] = Task {
+    stageExe(
+      defaultResolver(),
+      s"io.grpc:protoc-gen-grpc-java:$grpcVersion;classifier=${protocClassifier()};type=exe",
+      Task.dest / "protoc-gen-grpc-java")
+  }
+
+  /** Run protoc to generate Java message classes and gRPC service stubs. */
+  def protocGenerate: Task[PathRef] = Task {
+    val protoSrc = protoDir().path
+    val gen = Task.dest / "gen"
+    os.makeDir.all(gen)
+    val protos =
+      if (os.exists(protoSrc)) os.list(protoSrc).filter(_.ext == "proto")
+      else Seq.empty
+    if (protos.isEmpty) {
+      Task.log.info(s"No .proto files in $protoSrc; skipping protoc.")
+    } else {
+      os.proc(
+        protocExe().path,
+        s"--plugin=protoc-gen-grpc-java=${protocGenGrpcJavaExe().path}",
+        s"-I$protoSrc",
+        s"--java_out=$gen",
+        s"--grpc-java_out=$gen",
+        protos
+      ).call(cwd = Task.dest, stdout = os.Inherit, stderr = os.Inherit)
+    }
+    PathRef(gen)
+  }
+
+  /** Feed the generated .java sources into compilation. */
+  override def generatedSources: T[Seq[PathRef]] =
+    Task { super.generatedSources() ++ Seq(protocGenerate()) }
+
+  // ================================================================
+  // Protobuf schema linting (buf)
+  //
+  // A standalone validation gate — NOT part of compile/codegen.  Run
+  // `mill bufLint` (e.g. in CI) to lint src/proto against buf.yaml.  Uses the
+  // CLI only (no Buf Schema Registry); the binary is fetched from Maven like
+  // protoc.  See DESIGN.md §12.
+  // ================================================================
+
+  def bufExe: Task[PathRef] = Task {
+    stageExe(
+      defaultResolver(),
+      s"build.buf:buf:$bufVersion;classifier=${protocClassifier()};type=exe",
+      Task.dest / "buf")
+  }
+
+  /**
+   * Lint the proto module (`mill bufLint`); fails on any violation (buf exits
+   * non-zero, which makes os.proc throw).  A command, so it is CLI-invokable
+   * and always runs rather than caching a past success.
+   */
+  def bufLint() = Task.Command {
+    os.proc(bufExe().path, "lint")
+      .call(cwd = moduleDir, stdout = os.Inherit, stderr = os.Inherit)
+    ()
+  }
+
+  // Replaces test/package.mill.yaml (extends [build.JavaTests, TestModule.Junit5]).
+  object test extends JavaTests with TestModule.Junit5 {
+    def jupiterVersion = "5.11.4"
+  }
+}

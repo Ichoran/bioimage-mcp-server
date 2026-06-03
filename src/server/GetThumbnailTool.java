@@ -134,7 +134,7 @@ public final class GetThumbnailTool {
             String path,
             int series,
             Projection projection,
-            int[] channels,
+            Slice channels,
             int timepoint,
             int maxSize,
             Duration timeout,
@@ -154,17 +154,9 @@ public final class GetThumbnailTool {
             if (projection == null) {
                 throw new IllegalArgumentException("projection must not be null");
             }
-            if (channels != null) {
-                for (int ch : channels) {
-                    if (ch < 0) {
-                        throw new IllegalArgumentException(
-                                "channel indices must be non-negative");
-                    }
-                }
-                if (channels.length == 0) {
-                    throw new IllegalArgumentException(
-                            "channels array must not be empty");
-                }
+            if (channels == null) {
+                throw new IllegalArgumentException(
+                        "channels selection is required (use Slice.all() for ':')");
             }
             if (timepoint < 0) {
                 throw new IllegalArgumentException(
@@ -179,11 +171,10 @@ public final class GetThumbnailTool {
             if (maxBytes <= 0) {
                 throw new IllegalArgumentException("maxBytes must be positive");
             }
-            channels = channels != null ? channels.clone() : null;
         }
 
         public static Request of(String path, Integer series,
-                                   Projection projection, int[] channels,
+                                   Projection projection, Slice channels,
                                    Integer timepoint, Integer maxSize,
                                    Duration timeout, Long maxBytes) {
             return new Request(
@@ -199,7 +190,7 @@ public final class GetThumbnailTool {
 
         /** Minimal request with all defaults. */
         public static Request of(String path) {
-            return of(path, null, null, null, null, null, null, null);
+            return of(path, null, null, Slice.all(), null, null, null, null);
         }
     }
 
@@ -235,9 +226,9 @@ public final class GetThumbnailTool {
                         request.series(), DetailLevel.STANDARD);
                 var si = meta.detailedSeries();
 
-                // Resolve channels
-                int[] channelIndices = resolveChannels(
-                        request.channels(), si);
+                // Resolve channels (any list, e.g. ":", "0,2")
+                int[] channelIndices =
+                        request.channels().resolve(si.sizeC(), "channels");
 
                 // Validate timepoint
                 if (request.timepoint() >= si.sizeT()) {
@@ -592,23 +583,6 @@ public final class GetThumbnailTool {
     /**
      * Resolve requested channel indices, validating against the series.
      */
-    static int[] resolveChannels(int[] requested, SeriesInfo si) {
-        if (requested == null) {
-            // All channels
-            int[] all = new int[si.sizeC()];
-            for (int i = 0; i < si.sizeC(); i++) all[i] = i;
-            return all;
-        }
-        for (int ch : requested) {
-            if (ch >= si.sizeC()) {
-                throw new IllegalArgumentException(
-                        "channel " + ch + " out of range, series has "
-                        + si.sizeC() + " channel(s)");
-            }
-        }
-        return requested;
-    }
-
     // ================================================================
     // PNG encoding
     // ================================================================

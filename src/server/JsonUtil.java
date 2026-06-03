@@ -42,6 +42,33 @@ final class JsonUtil {
         }
     }
 
+    /**
+     * Parse a JSON object into a flat {@code Map<String, Object>} suitable
+     * for the argument-parsing helpers in {@link BioImageService}.  An
+     * empty or blank input is treated as an empty object (no arguments).
+     *
+     * @throws IllegalArgumentException if the input is not a JSON object
+     */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> parseObject(String json) {
+        if (json == null || json.isBlank()) {
+            return new LinkedHashMap<>();
+        }
+        Object parsed;
+        try {
+            parsed = MAPPER.readValue(json, Object.class);
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                    "request body is not valid JSON: " + e.getMessage());
+        }
+        if (parsed instanceof Map<?, ?> map) {
+            return (Map<String, Object>) map;
+        }
+        throw new IllegalArgumentException(
+                "request body must be a JSON object, got: "
+                + (parsed == null ? "null" : parsed.getClass().getSimpleName()));
+    }
+
     // ================================================================
     // ImageMetadata
     // ================================================================
@@ -145,21 +172,13 @@ final class JsonUtil {
     static Map<String, Object> toMap(StatsResult r) {
         var map = new LinkedHashMap<String, Object>();
         map.put("pixel_type", r.pixelType().name().toLowerCase());
-        map.put("channels", toMap(r.channels()));
-        map.put("z_range", toMap(r.zRange()));
-        map.put("t_range", toMap(r.tRange()));
+        map.put("channels", r.channels());
+        map.put("z_requested", r.zRequested());
+        map.put("t_requested", r.tRequested());
         map.put("z_slices_used", r.zSlicesUsed());
         map.put("timepoints_used", r.timepointsUsed());
         map.put("per_channel", r.perChannel().stream()
                 .map(JsonUtil::toMap).toList());
-        return map;
-    }
-
-    static Map<String, Object> toMap(GetIntensityStatsTool.Range range) {
-        if (range == null) return null;
-        var map = new LinkedHashMap<String, Object>();
-        map.put("start", range.start());
-        map.put("end", range.end());
         return map;
     }
 
@@ -219,6 +238,60 @@ final class JsonUtil {
     static Map<String, Object> toMap(ThumbnailResult r) {
         var map = new LinkedHashMap<String, Object>();
         map.put("projection_used", r.projectionUsed().name().toLowerCase());
+        return map;
+    }
+
+    // ================================================================
+    // OmeMetadata
+    // ================================================================
+
+    static Map<String, Object> toMap(OmeMetadata m) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("format", m.format());
+        map.put("content", m.content());
+        return map;
+    }
+
+    // ================================================================
+    // SessionInfo
+    // ================================================================
+
+    static Map<String, Object> toMap(SessionInfo s) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("handle", s.handle());
+        map.put("summary", toMap(s.summary()));
+        return map;
+    }
+
+    // ================================================================
+    // DepositDescriptor
+    // ================================================================
+
+    static Map<String, Object> toMap(DepositDescriptor d) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("offset", d.offset());
+        map.put("total_bytes", d.totalBytes());
+        map.put("plane_bytes", d.planeBytes());
+        map.put("pixel_type", d.pixelType());
+        map.put("bytes_per_sample", d.bytesPerSample());
+        map.put("signed", d.signed());
+        map.put("little_endian", d.littleEndian());
+        map.put("axis_order", DepositDescriptor.AXIS_ORDER);
+        var shape = new LinkedHashMap<String, Object>();
+        shape.put("x", d.sizeX());
+        shape.put("y", d.sizeY());
+        shape.put("c", d.sizeC());
+        shape.put("z", d.sizeZ());
+        shape.put("t", d.sizeT());
+        map.put("shape", shape);
+        // Per-axis resolved source indices (run-length [start,stop) ranges),
+        // so the byte stream is interpretable for an arbitrary 5D subset.
+        var selection = new LinkedHashMap<String, Object>();
+        for (var as : d.selection()) {
+            selection.put(as.axis(), as.ranges().stream()
+                    .map(r -> List.of(r.start(), r.stop())).toList());
+        }
+        map.put("selection", selection);
         return map;
     }
 

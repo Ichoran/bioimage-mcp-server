@@ -11,14 +11,14 @@
 // For development against a local build, use one of:
 //
 //     mill run                          # via Mill directly
-//     jbang --cp "$(mill show assembly | tr -d '"')" bioimage-mcp.java
+//     mill assembly && jbang --cp out/assembly.dest/out.jar bioimage_mcp.java
 //
 // Customize allow/deny paths below to control which filesystem
 // paths the server may access.  See DESIGN.md §5 for details.
 // =================================================================
 
 //REPOS mavencentral,ome=https://artifacts.openmicroscopy.org/artifactory/maven/
-//DEPS com.github.ichoran:bioimage_mcp_server:0.1.2
+//DEPS com.github.ichoran:bioimage_mcp_server:0.2.0
 //DEPS com.fasterxml.jackson.core:jackson-annotations:2.20
 
 import lab.kerrr.mcpbio.bioimageserver.BioImageMcpServer;

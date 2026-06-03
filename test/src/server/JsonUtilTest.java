@@ -3,7 +3,6 @@ package lab.kerrr.mcpbio.bioimageserver;
 import lab.kerrr.mcpbio.bioimageserver.ExportToTiffTool.Compression;
 import lab.kerrr.mcpbio.bioimageserver.ExportToTiffTool.ExportResult;
 import lab.kerrr.mcpbio.bioimageserver.ExportToTiffTool.MetadataMode;
-import lab.kerrr.mcpbio.bioimageserver.GetIntensityStatsTool.Range;
 import lab.kerrr.mcpbio.bioimageserver.GetIntensityStatsTool.StatsResult;
 import lab.kerrr.mcpbio.bioimageserver.GetThumbnailTool.Projection;
 import lab.kerrr.mcpbio.bioimageserver.GetThumbnailTool.ThumbnailResult;
@@ -123,9 +122,9 @@ class JsonUtilTest {
                 true, 0.5);
         var result = new StatsResult(
                 List.of(stats),
-                new Range(0, 0),
-                new Range(0, 9),
-                new Range(0, 0),
+                new int[] { 0 },
+                new int[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 },
+                new int[] { 0 },
                 new int[] { 0, 2, 5, 9 },
                 new int[] { 0 },
                 PixelType.UINT8);
@@ -138,6 +137,7 @@ class JsonUtilTest {
         assertTrue(json.contains("\"sampled\" : true"));
         assertTrue(json.contains("\"sampled_fraction\" : 0.5"));
         assertTrue(json.contains("\"z_slices_used\""));
+        assertTrue(json.contains("\"z_requested\""));
     }
 
     @Test

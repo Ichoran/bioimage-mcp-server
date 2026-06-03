@@ -236,6 +236,34 @@ The `inspect_image` tool does not need a `budget` parameter because its metadata
 detail levels (§2.1) already control response size, and metadata extraction is
 fast even for large files.
 
+### 2.7 `get_ome_metadata`
+
+**Purpose:** Return the file's complete extended metadata as a portable,
+**format-tagged document** — the raw OME metadata block rather than the parsed
+fields `inspect_image` returns.
+
+**Output (JSON):** two strings — `format` (`ome_xml` or `ome_ngff`) and
+`content` (the document). Bio-Formats synthesizes OME-XML from its OME model
+for essentially every file it reads, so `ome_xml` is the universal case; this
+is the most portable way to hand a file's metadata to other tools.
+
+**Why a tagged `(format, content)` pair rather than just XML:** it keeps the
+wire protocol stable as the representation evolves. A reader that can supply a
+native **OME-NGFF** (OME-Zarr) JSON block — or a future synthesis step — returns
+`ome_ngff` + JSON through the identical envelope, with no protocol change.
+(Bio-Formats core cannot supply NGFF today: reading OME-Zarr needs the separate
+`OMEZarrReader` add-on, and even then it normalizes through the OME model → OME-XML.)
+
+**Size:** the document can be large (per-plane metadata), and unlike a pixel
+read it cannot be meaningfully truncated — a partial XML/JSON is corrupt. So an
+optional `max_response_bytes` cap turns an over-size document into an error that
+reports the actual size (raise the cap to retrieve it) rather than a partial
+result. The MCP transport defaults this cap (the document enters the LLM
+context); the microservice transports do not.
+
+The reader seam is `ImageReader.getMetadataBlock()`, whose default derives an
+`ome_xml` block from `getOMEXML()`; a format-specific reader overrides it.
+
 
 ## 3. Technology Choices
 
@@ -418,8 +446,8 @@ public class bioimage_mcp {
 
 After `mill publish-local` (or equivalent), either:
 - Temporarily edit the `//DEPS` line to use the snapshot version, or
-- Use `jbang --cp $(mill show assembly) bioimage-mcp.java` to point at the local
-  build output, or
+- Use `mill assembly && jbang --cp out/assembly.dest/out.jar bioimage-mcp.java`
+  to point at the local build output (the fat jar Mill writes there), or
 - Run directly via Mill: `mill run`
 
 The README should document both workflows clearly.
@@ -621,3 +649,369 @@ These should be resolved during implementation:
 5. **Mill vs Gradle final decision.** Evaluate Mill 1.1's Java support
    concretely with the actual dependency set (Bio-Formats has complex transitive
    dependencies).  Fall back to Gradle if issues arise.
+
+
+## 9. Shared-Memory Deposit Protocol
+
+The microservice transport (`BioImageSocketService`) lets a co-located
+client receive **raw pixel volumes** with no copy through a socket body and
+no PNG/JSON re-encoding.  It is the data-plane complement to the MCP and
+HTTP adapters, built on the same protocol-neutral `BioImageService`
+(`deposit` operation, `DepositDescriptor`, `PixelSink`).
+
+### 9.1 Two planes
+
+- **Control plane** — a persistent **Unix-domain socket** carrying
+  newline-delimited JSON (one object per line, each direction).
+  `UnixDomainSocketAddress` works on Linux and Windows 10+; loopback TCP is
+  the fallback if a platform lacks UDS.
+- **Data plane** — a **client-owned region**: a file the client creates,
+  sizes, maps (`mmap`) into its own address space, and later unlinks.  On
+  `tmpfs`/`/dev/shm` its pages are RAM, so the server's positional writes
+  are visible to the client's mapping with no disk round-trip.  Pixel bytes
+  never travel over the socket.
+
+The server attaches to the region only for the duration of one deposit
+(opens the file, writes, flushes, closes) and **never unlinks it** —
+lifecycle management is entirely the client's.
+
+### 9.2 Ownership and lifecycle decisions
+
+- **Client owns the region.** It creates and pre-sizes the file and passes a
+  `capacity_bytes`.  The server computes `required = T·Z·C·Y·X·bytesPerSample`
+  and **refuses** (`INVALID_ARGUMENT`, writing nothing) if
+  `required > capacity_bytes` — no false confidence that a short buffer
+  "worked".  The server maps exactly `required` and never grows the region.
+- **Reply means ready.** The server responds `filled` only after every byte
+  is written and flushed; no `filled` ⇒ the region is incomplete and the
+  client must discard it.  There is no separate ready flag.
+- **Drop on disconnect.** The connection thread only reads, so a client
+  close is observed promptly as EOF; an in-flight deposit is cancelled
+  (interrupt-with-backoff via `CancellableTask.Handle`), the `PixelSink` is
+  always closed, and no reply is sent.
+- **Native endianness.** Bytes are written in the source file's order;
+  `little_endian` in the descriptor reports which (never byte-swapped).
+- **Access control.** Both the source image path and the target region path
+  pass the same deny > allow > client-roots check as every other operation,
+  so a crafted `target.path` cannot induce the server to write outside
+  permitted directories.  Clients typically `--allow /dev/shm`.
+
+### 9.3 Buffer layout
+
+Pixels are written in **C-order with X fastest and T slowest**, in the
+**NGFF / OME-Zarr canonical axis order** `["t","c","z","y","x"]` (time, then
+channel, then the spatial axes).  The element at `(t,c,z,y,x)` — indices
+relative to the *deposited selection*, not the source file — lives at byte
+offset
+
+```
+((((t*sizeC + c)*sizeZ + z)*sizeY + y)*sizeX + x) * bytesPerSample
+```
+
+We deliberately normalize to this order (not the source file's arbitrary
+`dimensionOrder`, which is generally not NGFF-compliant) so a mapped region
+drops straight into an OME-Zarr / NGFF consumer (napari, zarr, dask) without
+a transpose, and each channel's full Z-stack is a contiguous (channel-major)
+block.
+
+Each `readPlane` result is one `(t,c,z)` plane of `sizeY*sizeX` samples in
+row-major order, copied verbatim at `planeIndex * planeBytes`.  A "volume"
+is simply a deposit with a full Z-range and a single channel/timepoint;
+there is no native multi-plane read in Bio-Formats, so the server loops
+planes and composes the contiguous buffer itself.
+
+### 9.4 Messages
+
+On connect the server sends a hello:
+
+```json
+{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.2.0"}
+```
+
+**Deposit** (one in flight per connection, sequential; `id` is client-chosen
+and echoed):
+
+```json
+{"type":"deposit","id":"c1",
+ "path":"/data/stack.czi","series":0,
+ "channels":"0",                   // slice selection (required): ":" = all,
+ "z":":",                          //   "0,2" = list, "4:9" = range, etc.
+ "t":"0",                          //   omitting any of these is an error
+ "target":{"kind":"file","path":"/dev/shm/bio-7f3a","capacity_bytes":43352064},
+ "timeout_seconds":60}
+```
+
+Set `"dry_run":true` (and omit `target`) to get the descriptor — with
+`total_bytes` — *without* writing, so the client can size the region first.
+
+**Filled** (the success reply; carries the full `DepositDescriptor`):
+
+```json
+{"type":"filled","id":"c1",
+ "offset":0,"total_bytes":43352064,"plane_bytes":688128,
+ "pixel_type":"uint16","bytes_per_sample":2,"signed":false,"little_endian":true,
+ "axis_order":["t","c","z","y","x"],
+ "shape":{"x":672,"y":512,"c":1,"z":21,"t":1},
+ "selection":{"t":[[0,1]],"c":[[0,1]],"z":[[0,21]],"y":[[0,512]],"x":[[0,672]]}}
+```
+
+`shape` gives the per-axis *counts*; `selection` gives the actual **source
+indices** delivered on every axis, in buffer order, as run-length
+`[start, stop)` ranges.  The counts alone are not enough to interpret the
+bytes when a channel/Z/T selection is a non-contiguous or reordered list — e.g.
+`channels:"0,2,5"` yields `"c":[[0,1],[2,3],[5,6]]`, so buffer channel 0/1/2 map
+to source channels 0/2/5.  X and Y are always the full plane here, but are
+reported anyway so the format is general (a server that crops X/Y fills in real
+sub-selections through the same field).
+
+**Error** (`error_kind` is `access_denied` | `invalid_argument` | `timeout`
+| `io_error` for operation failures):
+
+```json
+{"type":"error","id":"c1","error_kind":"invalid_argument","message":"..."}
+```
+
+**Shutdown** — a client may ask the server to exit, honored **only when the
+requester is the sole connected client** so one client can never tear the
+server out from under others:
+
+```json
+{"type":"shutdown","id":"s1"}
+→ {"type":"shutdown_ok","id":"s1"}          // then the server exits
+→ {"type":"error","id":"s1","error_kind":"shutdown_refused",
+   "message":"refusing shutdown: N other client(s) connected"}
+```
+
+On `shutdown_ok` the server closes the listener, removes the socket file
+(via its shutdown hook), and exits; the client observes the reply followed
+by EOF.  The server flushes `shutdown_ok` and then exits without waiting to
+confirm delivery — a robust client must already tolerate the server
+vanishing at any moment (crash, OOM, host reboot), so "I requested shutdown
+and the final bytes didn't arrive" is just one case of that general
+responsibility, not a special one worth a delivery handshake.
+
+### 9.5 Future sink kinds
+
+`target.kind` is a tagged union; `"file"` (`MappedFileSink`) is the only v1
+implementation.  A true POSIX `shm_open` object (`"posix_shm"`) or a Windows
+named mapping (`"win_named"`) can be added as new `PixelSink`s behind the
+same envelope — via the Foreign Function & Memory API — without any change
+to the wire protocol or the deposit logic.  The file-backed path is
+preferred until profiling shows the `tmpfs` indirection matters, because it
+is one cross-platform code path with no FFM and no 2 GB
+`MappedByteBuffer` limit (positional `FileChannel` writes take `long`
+offsets).
+
+
+## 10. Stateful Sessions (kept-open readers)
+
+Every operation in §2 is **stateless**: it opens a fresh Bio-Formats reader,
+does one thing, and closes it.  That is the right default for the
+request/response transports (MCP/stdio, HTTP), but it is wasteful for the
+persistent-connection transports, where a client typically keeps working with
+the *same* image — reading many planes, depositing several volumes.  Re-opening
+and re-parsing the file on every call repeats the most expensive metadata work.
+
+A **session** lets a client open an image once and reuse the open reader.
+
+### 10.1 Model
+
+- `open` validates a `path`, opens a reader, reads its SUMMARY metadata, and
+  registers an `ImageSession` keyed by a server-generated **handle** (a UUID).
+  It returns `{handle, summary}`.
+- Any read operation (`inspect_image`, `get_plane`, `get_intensity_stats`,
+  `get_thumbnail`, `deposit`) may then carry `handle` **instead of** `path`,
+  and runs against the already-open reader.  `export_to_tiff` stays path-only
+  (a one-shot write, no reuse benefit).
+- `close` removes the session and closes the reader.
+
+The seam in `BioImageService` is deliberately small.  A `withSession(args,
+body)` helper routes each read op: with no `handle` it calls the body with the
+normal per-call reader factory (today's behavior, unchanged); with a `handle`
+it holds the session lock, injects the session's canonical `path`, and supplies
+a `HeldImageReader` factory.  `HeldImageReader` is an `ImageReader` over the
+session's open reader whose `open()` and `close()` are **no-ops** — so the
+existing tools, which all do `try (var r = factory.get()) { r.open(path); … }`,
+run unchanged without re-opening or closing the shared reader.
+
+### 10.2 Ownership, concurrency, lifecycle
+
+- **The transport owns the lifetime, the service owns the registry.**
+  `BioImageService` holds the `handle → ImageSession` map and the open/close
+  operations; it does not decide *when* a session dies.  A session-capable
+  transport tracks the handles opened on each connection and calls
+  `closeSession` for each when the client closes them or the connection drops.
+  This is the same per-connection ownership the deposit cancellation already
+  uses.
+- **Disconnect closes the reader.**  This is the core guarantee: an `open`
+  reader is never leaked.  The socket adapter closes a connection's handles in
+  its `finally`; the gRPC adapter does so on stream `onError`/`onCompleted`.
+- **Per-session serialization.**  Bio-Formats readers are not thread-safe, so
+  every operation on a session holds the session's `ReentrantLock`.
+  `closeSession` also takes the lock, so the reader is never closed out from
+  under an in-flight read (the transport cancels an in-flight deposit first;
+  `closeSession` then waits for it to unwind before closing).
+- **Access control still applies.**  The path is checked at `open`, and the
+  (stable) deny/allow policy is re-applied on each handle operation; a handle
+  is not a capability that bypasses the policy.
+
+### 10.3 Which transports
+
+Sessions are exposed on the **persistent-connection** transports only —
+the UDS socket (§9) and gRPC (§11).  HTTP has no connection to own a session's
+lifetime (a leaked handle would have no natural close trigger), and the stdio
+MCP server is single-client/sequential, so the reuse win does not justify the
+added surface.  Both stay stateless.
+
+
+## 11. Local gRPC Transport
+
+Some access patterns are inherently stateful: if you hold an open connection,
+you very likely want to keep reading the same image.  gRPC is a natural fit —
+a typed, streaming, widely-supported RPC layer — and pairs well with the
+shared-memory deposit for the bulk data.
+
+### 11.1 Shape
+
+`BioImageGrpcService` is a fourth sibling adapter over `BioImageService`
+(alongside MCP, HTTP, socket): all transport, no image logic.  It exposes a
+single bidirectional RPC
+
+```proto
+service BioImage { rpc Session(stream ClientMsg) returns (stream ServerMsg); }
+```
+
+whose stream lifetime **is** the session-owning connection — the exact
+analogue of the socket adapter's persistent NDJSON connection.  `ClientMsg` /
+`ServerMsg` are `oneof` envelopes carrying the same operations and the same
+string slice-selections used on every other transport.  The wire contract is
+`src/proto/bioimage.proto`; the Java stubs are generated at build time (see
+§11.3).
+
+- **Control plane:** the protobuf stream.  Inspect/stats results return as JSON
+  strings (`JsonUtil` is the single source of truth for that shape rather than
+  re-modelling all metadata in protobuf); plane/thumbnail return PNG bytes
+  inline (acceptable on a local link).
+- **Data plane:** a `deposit` writes raw pixels into the same client-owned
+  shared-memory region as §9; only the `DepositDescriptor` (`Filled`) crosses
+  the wire.
+
+### 11.2 Lifecycle and local-only binding
+
+gRPC delivers a stream's `onNext` calls serially.  Read ops are answered
+inline; a `deposit` is awaited on a worker and its reply written back under a
+write-lock, so the stream stays responsive (one deposit in flight per stream).
+On stream `onError`/`onCompleted` the adapter cancels any in-flight deposit and
+closes every handle the stream opened — closing the kept-open readers.  A
+`shutdown` message is honored only when the requester is the sole connected
+stream, mirroring the socket adapter.
+
+The server binds the **loopback interface only** (`127.0.0.1`), via
+`grpc-netty-shaded` — cross-platform, no native epoll dependency, no TLS, no
+auth.  This is a local data-plane transport by design; a remote/secured gRPC
+endpoint (TLS, UDS via native transport, authn) is a future extension that
+does not change the tool logic.
+
+### 11.3 Build: Maven-fetched protoc toolchain
+
+The build (`build.mill`, Scala) resolves the `protoc` compiler
+(`com.google.protobuf:protoc`) and the gRPC plugin
+(`io.grpc:protoc-gen-grpc-java`) from Maven as OS-classified `exe` artifacts,
+runs them in a `protocGenerate` task, and feeds the generated Java into
+`generatedSources`.  No system `protoc` is required, and the whole toolchain
+is version-pinned in lockstep with the grpc-java/protobuf-java runtime (grpc
+1.81.0 / protobuf 3.25.8).  Converting from the former `build.mill.yaml` to
+Scala was necessary because the YAML build format cannot express a custom
+code-generation task.
+
+
+## 12. Protocol Governance
+
+We expose four transports over one protocol-neutral core, which raises the
+question every multi-transport, multi-client system faces: **how do N clients
+and M servers stay interoperable on one protocol without drift?**  Our answer
+rests on a deliberate split of authority.
+
+### 12.1 Sovereign vs. conformance surfaces
+
+- **Socket and HTTP are sovereign surfaces.**  We define them, we own their
+  wire formats, and we change them on our terms.  They carry the full feature
+  set at full fidelity.
+- **gRPC is a conformance surface.**  gRPC's value is interoperability — a
+  client that consumes many gRPC servers wants them to speak one schema.  So if
+  a sufficiently important client (or an emerging community standard) defines an
+  imaging-server contract, the right move is for us to **conform to it** rather
+  than impose our own.  We can afford this precisely because socket and HTTP
+  remain under our undisputed authority: being a polite guest on gRPC costs us
+  no control over our native API.
+
+This is the same pattern as CSI (Kubernetes defines the gRPC contract; storage
+vendors conform), Envoy xDS, and LSP/DAP: the important *consumer* owns the
+contract and ships a conformance test; *implementers* conform.
+
+### 12.2 Why conforming is cheap here
+
+Because {@code BioImageService} is protocol-neutral, conforming to someone
+else's gRPC contract is **another thin adapter** against the same core —
+exactly how {@code BioImageGrpcService} was written against our own
+{@code bioimage.proto}.  The image logic never moves.  Ownership of the schema
+can therefore stay undecided until a real consumer appears: today we own
+{@code src/proto/bioimage.proto} (server-authoritative); switching to
+consumer-authoritative later is an adapter swap, not a rewrite.
+
+### 12.3 Keeping one protocol stable across N×M
+
+The `.proto` *is* the contract, and three disciplines keep it interoperable:
+
+1. **One source of truth, not copies.**  Clients and servers import the same
+   schema (published stubs, a shared repo, or a registry) rather than vendoring
+   divergent copies.
+2. **Wire-compatibility rules.**  Protobuf's guarantees — never reuse field
+   numbers, add only `optional` fields, never change a field's type, ignore
+   unknown fields — let an old client talk to a new server and vice-versa.
+   That is what makes loose N×M coupling survive change.
+3. **Versioned packages.**  The package is `…bioimage.v1`; a genuine break ships
+   `…v2` as a *parallel* service run alongside `v1` during migration — never a
+   flag day.
+
+**Tooling.**  We lint the schema with the **buf CLI**, fetched from Maven
+Central (`build.buf:buf`, same OS-classified `exe` scheme as protoc) and run as
+`mill bufLint` — a standalone gate, not part of compile, and **CLI-only with no
+Buf Schema Registry dependency**.  `buf.yaml` excepts the few STANDARD rules
+that conflict with deliberate design choices (the single bidi `Session` stream
+with `ClientMsg`/`ServerMsg` envelopes, and the flat `src/proto` layout).
+Breaking-change detection (`buf breaking`) is deferred until `v1` is frozen —
+while we are still making intentional breaks pre-release it would only be noise.
+
+### 12.4 Conformance is semantic, not just syntactic
+
+The schema does not capture everything two implementations must agree on.  The
+deposit **axis order is TCZYX** (§9.3) — the descriptor carries `axis_order` as
+*data*, but "you MUST emit `[t,c,z,y,x]`" is a semantic rule.  Likewise the
+error-kind vocabulary, the "missing slice is an error" rule, the capacity
+refusal that writes nothing, and the `max_response_bytes` behavior.  These live
+in the conformance spec — `service-endpoints.md` — which any conforming server
+(ours or a third party's) must satisfy beyond merely compiling against the
+`.proto`.
+
+### 12.5 Accepting a richer contract while reporting reduced capability
+
+A conformance surface must let a client send fields aimed at *more-capable*
+servers without forcing per-server request shapes — provided the server never
+misrepresents what it did.  The gRPC `DepositRequest` does exactly this with
+three fields it does not honor:
+
+- **`y` / `x` sub-ranges** — accepted but ignored (Bio-Formats is plane-based, so
+  the full plane is served).  No deception is possible because the `Filled`
+  descriptor's `shape` reports the actual extent on every axis; a client that
+  asked for a sub-range sees the full extent it received.
+- **`level`** (pyramid tier) — only level 0 (full resolution) is served; a
+  non-zero level is **refused**, never silently downgraded.  Silently serving
+  level 0 for a level-2 request would be false confidence (§ Project outlook);
+  an explicit refusal is the honest outcome.
+
+The rule that makes this safe is the same one that governs the whole project:
+**always report what was actually delivered, on every axis.**  Given that, a
+server may accept a superset of the protocol it implements — the descriptor, not
+the request, is the source of truth.  These concessions are gRPC-only; the
+sovereign socket/HTTP surfaces carry only what they implement.

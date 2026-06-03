@@ -46,9 +46,9 @@ public final class GetPlaneTool {
     public record Request(
             String path,
             int series,
-            int channel,
-            int z,
-            int timepoint,
+            Slice channel,
+            Slice z,
+            Slice t,
             boolean normalize,
             Integer maxSize,
             Duration timeout,
@@ -64,14 +64,9 @@ public final class GetPlaneTool {
             if (series < 0) {
                 throw new IllegalArgumentException("series must be non-negative");
             }
-            if (channel < 0) {
-                throw new IllegalArgumentException("channel must be non-negative");
-            }
-            if (z < 0) {
-                throw new IllegalArgumentException("z must be non-negative");
-            }
-            if (timepoint < 0) {
-                throw new IllegalArgumentException("timepoint must be non-negative");
+            if (channel == null || z == null || t == null) {
+                throw new IllegalArgumentException(
+                        "channel, z, and t are required");
             }
             if (maxSize != null && maxSize < 1) {
                 throw new IllegalArgumentException("maxSize must be positive");
@@ -84,16 +79,16 @@ public final class GetPlaneTool {
             }
         }
 
-        public static Request of(String path, Integer series, Integer channel,
-                                  Integer z, Integer timepoint,
+        public static Request of(String path, Integer series, Slice channel,
+                                  Slice z, Slice t,
                                   Boolean normalize, Integer maxSize,
                                   Duration timeout, Long maxBytes) {
             return new Request(
                     path,
                     series != null ? series : 0,
-                    channel != null ? channel : 0,
-                    z != null ? z : 0,
-                    timepoint != null ? timepoint : 0,
+                    channel != null ? channel : Slice.single(0),
+                    z != null ? z : Slice.single(0),
+                    t != null ? t : Slice.single(0),
                     normalize != null ? normalize : true,
                     maxSize,
                     timeout != null ? timeout : DEFAULT_TIMEOUT,
@@ -101,7 +96,8 @@ public final class GetPlaneTool {
         }
 
         public static Request of(String path, int channel) {
-            return of(path, null, channel, null, null, null, null, null, null);
+            return of(path, null, Slice.single(channel),
+                    null, null, null, null, null, null);
         }
     }
 
@@ -131,10 +127,13 @@ public final class GetPlaneTool {
             try (var reader = readerFactory.get()) {
                 reader.open(canonicalPath);
 
-                // Validate coordinates
+                // Resolve the single-plane coordinates (each must select
+                // exactly one index; negatives count from the end).
                 var meta = reader.getMetadata(request.series(), DetailLevel.SUMMARY);
                 var si = meta.detailedSeries();
-                validateCoordinates(request, si);
+                int channel = request.channel().resolveSingle(si.sizeC(), "channel");
+                int z = request.z().resolveSingle(si.sizeZ(), "z");
+                int timepoint = request.t().resolveSingle(si.sizeT(), "t");
 
                 // Check byte budget
                 long planeBytes = (long) si.sizeX() * si.sizeY()
@@ -147,8 +146,7 @@ public final class GetPlaneTool {
 
                 // Read the plane
                 byte[] raw = reader.readPlane(
-                        request.series(), request.channel(),
-                        request.z(), request.timepoint());
+                        request.series(), channel, z, timepoint);
 
                 // Convert to uint8
                 ByteOrder order = reader.isLittleEndian(request.series())
@@ -259,25 +257,5 @@ public final class GetPlaneTool {
         return image;
     }
 
-    private static void validateCoordinates(Request request, SeriesInfo si) {
-        if (request.series() >= 0) {
-            // Series was already validated by getMetadata
-        }
-        if (request.channel() >= si.sizeC()) {
-            throw new IllegalArgumentException(
-                    "channel " + request.channel()
-                    + " out of range, series has " + si.sizeC() + " channel(s)");
-        }
-        if (request.z() >= si.sizeZ()) {
-            throw new IllegalArgumentException(
-                    "z " + request.z()
-                    + " out of range, series has " + si.sizeZ() + " Z-slice(s)");
-        }
-        if (request.timepoint() >= si.sizeT()) {
-            throw new IllegalArgumentException(
-                    "timepoint " + request.timepoint()
-                    + " out of range, series has " + si.sizeT() + " timepoint(s)");
-        }
-    }
 
 }

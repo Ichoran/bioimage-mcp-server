@@ -7,6 +7,254 @@ identified that deserves its own step.  Re-order when priorities change.
 `../../java/bioformats` (i.e. `~/Code/java/bioformats`).  Use it to
 look up API details, pixel type constants, metadata accessors, etc.
 
+## Phase 9: Transport separation (MCP ↔ microservice) — done
+
+- **`BioImageService`** — protocol-neutral core extracted from
+  `BioImageMcpServer`.  Owns the file-access policy (deny/allow/client
+  roots), the reader/writer factories, the shared `--allow`/`--deny`
+  CLI options, and the five image operations.  Each operation takes a
+  flat snake_case `Map<String,Object>` (the lowest common denominator
+  any transport can produce) and returns a `ToolResult`, converting
+  argument-parse errors into `INVALID_ARGUMENT` failures instead of
+  throwing.  The arg-parsing helpers (`parseRange`, `optInt`,
+  `optEnum`, …) moved here so every adapter shares them.  Thread-safe:
+  each call gets its own reader; policy held in `volatile` fields.
+- **`BioImageMcpServer`** — now a thin MCP/stdio adapter over
+  `BioImageService`.  Keeps only transport glue: JSON schemas, tool
+  specs, the stdio transport, the client-roots → `setClientRoots`
+  bridge, and `ToolResult → CallToolResult` mapping.  Public surface
+  unchanged (`builder().allow()/.deny().build().run()`, `NAME`,
+  `VERSION`) so the existing runner and tests are untouched.
+- **`BioImageHttpService`** — sibling adapter proving separability.
+  Plain `com.sun.net.httpserver` (no new deps).  `POST /<tool>` with
+  the same JSON arg body; JSON tools return `application/json`, image
+  tools return raw `image/png` bytes (thumbnail's projection in an
+  `X-Projection-Used` header).  `ToolResult.Failure` → HTTP status by
+  kind (403/400/504/502); malformed body → 400; wrong method → 405.
+  Virtual-thread-per-task executor; each request gets its own reader.
+  `JsonUtil.parseObject` added for request-body parsing.
+- **`runner/bioimage_http.java`** — JBang wrapper mirroring
+  `bioimage_mcp.java`.  Launching the microservice is just running a
+  different wrapper file.  (Local dev runs the class from the fat jar
+  directly until a release containing it is published, since the
+  published `//DEPS` artifact would otherwise shadow new classes.)
+- **Validated:** `mill test` 120 classes green; MCP smoke test 9/9
+  (also fixed a stale `0.1.0` version assertion → `0.1.1`); HTTP
+  adapter exercised live against the real Zeiss CZI fixture —
+  inspect/plane/thumbnail and every error path (access-denied,
+  invalid-arg, malformed-JSON, wrong-method, missing-file) confirmed.
+
+### Possible future improvements (not blocking)
+
+- **Concurrency hardening** — readers are created per-call (safe), but
+  a multi-client microservice may want a bounded reader pool to cap
+  open files / memory under load.
+
+
+## Phase 10: Shared-memory deposit — done
+
+Full protocol spec in DESIGN.md §9.
+
+- **`BioImageService.deposit`** — new protocol-neutral operation that
+  reads a selection (channel/Z/T ranges over a series) and writes the
+  raw native pixel bytes contiguously into a client-owned region.  No
+  normalization, no PNG — one layer below the display tools, looping
+  `ImageReader.readPlane` and composing the volume itself (Bio-Formats
+  has no multi-plane read).  Buffer is C-order, axis order
+  `[t,z,c,y,x]`, X fastest.  Enforces `required ≤ capacity_bytes`
+  (writes nothing on a short buffer), validates both source and target
+  paths through the existing access policy, and never unlinks the
+  region.  Returns a self-describing `DepositDescriptor`.  A
+  `dry_run` flag returns the descriptor (with `total_bytes`) without
+  writing, so the client can size the region first.  Runs under a
+  `CancellableTask` so it honors both the timeout and a transport-
+  driven `DepositHandle.cancel()`; the `PixelSink` is always closed.
+- **`PixelSink` / `MappedFileSink`** — sink abstraction; the v1
+  `file` implementation writes via positional `FileChannel.write`
+  (long offsets, no 2 GB `MappedByteBuffer` limit, no FFM).  On
+  `tmpfs`/`/dev/shm` the client's `mmap` sees the writes without a
+  disk round-trip.  `posix_shm`/`win_named` kinds can slot in behind
+  the same tagged `target` later.
+- **`BioImageSocketService`** — third sibling adapter (UDS, NDJSON
+  control plane).  Connection thread reads only (prompt EOF →
+  cancel); deposit replies written from a worker so a disconnect is
+  always noticed.  Sequential one-deposit-per-connection; connections
+  reused.  Added a **`shutdown`** control message honored only when the
+  requester is the sole connected client (tracked via an
+  `AtomicInteger`), so one client can't tear the server out from under
+  others; on `shutdown_ok` it closes the listener, removes the socket
+  file, and exits.  `runner/bioimage_socket.java` wrapper.
+- **Validated:** 5 `DepositTest` unit tests (byte-exact layout against
+  `FakeImageReader`'s deterministic formula, multi-channel axis order,
+  dry-run, capacity-too-small writes nothing, source-outside-allow
+  denied) — 362 tests green.  Live UDS exercise against the real Zeiss
+  CZI: hello, dry-run sizing, real fill into `/dev/shm` (688 128 bytes,
+  data verified non-zero), capacity-rejection, connection reuse, abrupt
+  mid-deposit disconnect (server survived and kept serving), shutdown
+  refusal with 2 clients + clean self-shutdown as sole client (process
+  exited, socket file removed — no kill needed).
+
+### Possible future improvements (not blocking)
+
+- **True shared memory fast-path** — POSIX `shm_open` / Windows named
+  mapping via FFM, if `tmpfs` file indirection ever shows up in
+  profiling.  Same protocol, new `PixelSink`.
+- **Pipelined deposits** — the `id` field is already echoed, so
+  relaxing the one-in-flight-per-connection rule is forward-compatible
+  if a client wants concurrent fills into distinct regions.
+- **Expose `deposit` on the HTTP adapter** — a `dry_run` over HTTP is a
+  cheap way to size regions for clients that prefer request/response.
+
+
+## Phase 11: Slice selections (Python-style ranges) — done
+
+Replaced the old single/`_start`/`_end` integer selection params with a
+unified **`Slice`** grammar across every tool, end to end.
+
+- **`Slice`** — a comma-separated list of Python-style terms parsed from
+  a string (a bare int is also accepted): `"9"`, `"-9"`, `"2:4"` (half-
+  open), `"5:"`, `":-3"`, `":"`, and lists like `"0,2,5"` / `"4:9,11:"`.
+  Resolves against a dimension size to an `int[]` (ordered, repeats
+  allowed — `"3,3"` reads a plane twice on purpose). Half-open like
+  Python; **explicit** out-of-bounds is an error (no silent clamp);
+  empty selections error; step slices rejected. Also
+  `resolveContiguous` → `Range` (for the OME-TIFF writer) and
+  `resolveSingle` → int (for single-plane tools).
+- **`Range`** promoted to a top-level resolved (inclusive) type; its old
+  negative/inclusive `resolve` logic moved into `Slice`.
+- **Missing = empty = error.** Omitting `channels`/`z`/`t` is now an
+  error (you must write `":"` for all), so a call can never silently
+  pull a whole dimension — fixes the deposit "grab everything" footgun.
+  Single-plane selectors (`get_plane` channel/z/t, `get_thumbnail` t)
+  keep their `0` default and now accept negative indices.
+- **Wire params unified** to `channels`/`z`/`t` (slices) and
+  `channel`/`z`/`t` (single) — replacing `channel`/`channel_start`/…,
+  `z_slice`/`z_start`/…, `timepoint`/`t_start`/…, and the old `int[]
+  channels`. Stats `:` on z/t still triggers adaptive reading; export
+  requires z/t to be a single contiguous range (writer constraint),
+  while channels may be any list.
+- Updated MCP schemas, all five tools, `BioImageService`, `JsonUtil`
+  (`StatsResult` now reports `channels`/`z_requested`/`t_requested` as
+  int[]), the integration smoke test, and all tool tests; added
+  `SliceTest`. Validated: 382 unit tests green, MCP smoke test 9/9, live
+  socket deposit with `channels:"0,2"` (non-contiguous) + missing-
+  selection error. **Breaking** API change; docs (service-endpoints.md,
+  API-http.md, API-socket.md, DESIGN.md §9) updated.
+
+
+## Phase 12: gRPC transport + stateful sessions — done
+
+Full spec in DESIGN.md §10 (sessions) and §11 (gRPC).
+
+- **Build conversion (staged, behavior-preserving first).**
+  `build.mill.yaml` → Scala `build.mill`, done in two verified stages: a
+  faithful 1:1 translation (no new deps) gated on `mill clean && compile
+  && test` (382 green) + assembly + MCP smoke (9/9) — proving the migration
+  changed nothing — then the gRPC layer.  YAML had to go because it can't
+  express a custom codegen task.  `test/package.mill.yaml` folded into an
+  inner `object test`.
+- **Maven-fetched protoc toolchain.** A `protocGenerate` task resolves
+  `com.google.protobuf:protoc` and `io.grpc:protoc-gen-grpc-java` as
+  OS-classified `exe` artifacts via the Mill/coursier resolver
+  (`;classifier=…;type=exe`, `artifactTypes=Some(Set(Type("exe")))`), copies
+  them out of the read-only cache, `chmod +x`, runs protoc, and feeds the
+  output into `generatedSources`.  No system protoc.  Versions pinned in
+  lockstep: grpc-java 1.81.0 / protobuf 3.25.8 / protoc 3.25.8 (+
+  `org.apache.tomcat:annotations-api` for the stubs' `javax.annotation`).
+- **Session layer (`BioImageService`).** `openSession`/`closeSession` +
+  a `withSession` seam; new `ImageSession` (open reader + canonical path +
+  `ReentrantLock`, `AutoCloseable`), `HeldImageReader` (no-op open/close
+  delegating wrapper so the existing tools reuse a shared reader unchanged),
+  `SessionInfo` (handle + SUMMARY metadata).  All five read ops accept
+  `handle` as an alternative to `path`; `runDeposit` refactored into a
+  reusable `depositInto` with a handle branch holding the session lock.
+  `export_to_tiff` stays path-only.  Sessions are owned by the connection;
+  `closeSession` takes the lock so the reader is never closed mid-read.
+- **Socket adapter extended.** Was deposit-only; now serves the read ops +
+  `open`/`close` over NDJSON, accepting `handle` or `path`; JSON results
+  under `result`, PNG as base64 (`png_base64`); per-connection handle set
+  closed on disconnect.
+- **gRPC adapter (`BioImageGrpcService`) + `src/proto/bioimage.proto` +
+  `runner/bioimage_grpc.java`.** Single bidi `Session` stream = one
+  connection; `oneof` client/server messages; loopback TCP via
+  `grpc-netty-shaded`; deposit data still via the shared-memory region;
+  stream death cancels in-flight deposit and closes all handles; `shutdown`
+  honored only when sole stream.
+- **Validated:** 390 → **392 unit tests green** (`SessionTest` ×6,
+  `BioImageGrpcServiceTest` ×2 incl. dropped-stream-closes-reader,
+  `SocketSessionTest` ×2 incl. disconnect cleanup); `mill clean` + full
+  build + codegen clean; MCP smoke test 9/9 with the gRPC-laden assembly.
+  Docs updated: DESIGN §10/§11, service-endpoints.md, API-socket.md, new
+  API-grpc.md, CLAUDE.md (build now Scala), this file.
+
+### Possible future improvements (not blocking)
+- Secure/remote gRPC (TLS, UDS via native transport, authn).
+- Idle-TTL session sweeper as a backstop beyond connection-scoped cleanup.
+- Expose sessions on a future stateful HTTP variant if ever needed.
+
+
+## Phase 13: NGFF-order deposit + portable metadata document — done
+
+- **TCZYX deposit layout.** The shared-memory deposit now writes pixels in the
+  NGFF / OME-Zarr canonical axis order `[t,c,z,y,x]` (was `[t,z,c,y,x]`), so a
+  mapped region drops into napari/zarr/dask without a transpose and each
+  channel's Z-stack is a contiguous (channel-major) block.  We normalize to
+  this order regardless of the source file's arbitrary `dimensionOrder`.
+  Changed: the `depositInto` loop nesting + offset, `DepositDescriptor`
+  (AXIS_ORDER + javadoc), `DepositTest` (multichannel offset + rename), DESIGN
+  §9.3/§9.4, API-socket.md §7 (formula, axis_order, NumPy shape), API-grpc.md.
+  **Breaking** wire-layout change (descriptor's `axis_order` self-documents it).
+- **`get_ome_metadata` operation.** Returns the file's full extended metadata as
+  a portable, format-tagged `{format, content}` document — `ome_xml` (the
+  universal case, synthesized by Bio-Formats) today, `ome_ngff` reserved for a
+  reader that can supply a native OME-Zarr JSON block (Bio-Formats core can't —
+  it needs the `OMEZarrReader` add-on and still normalizes through the OME
+  model).  The tagged envelope means NGFF slots in with no wire change.  New
+  `OmeMetadata` record + `ImageReader.getMetadataBlock()` default (derives the
+  `ome_xml` block from `getOMEXML()`); `BioImageService.getOmeMetadata` with
+  handle/path routing and a `max_response_bytes` cap (over-size → INVALID_ARGUMENT
+  reporting the byte count; never truncated).  Exposed on all four transports:
+  MCP tool (default 256 KB cap, since it enters context), HTTP `POST
+  /get_ome_metadata`, socket `get_ome_metadata` op, gRPC
+  `OmeMetadataRequest`/`OmeMetadataResult`.
+- **Validated:** 393 unit tests green (+`SessionTest.omeMetadataByPathAndHandleAndCap`,
+  plus get_ome_metadata round-trips folded into the gRPC and socket integration
+  tests; DepositTest updated for TCZYX).  Docs updated: DESIGN §2.7 + §9,
+  service-endpoints.md, API-socket.md, API-grpc.md, README, this file.
+
+
+## Phase 14: Protocol governance, buf lint, deposit completeness — done
+
+- **`mill bufLint`.** Standalone schema-lint command (not part of compile).
+  The buf CLI is fetched from Maven Central (`build.buf:buf`) using the same
+  OS-classified `exe` scheme as protoc, so `stageExe`/`protocClassifier` work
+  verbatim — CLI-only, no Buf Schema Registry.  `buf.yaml` runs STANDARD,
+  excepting the rules that conflict with deliberate choices (single bidi
+  `Session` stream with `ClientMsg`/`ServerMsg` envelopes; flat `src/proto`).
+  `buf breaking` deferred until v1 is frozen.
+- **DESIGN §12 Protocol Governance.** Doctrine: socket/HTTP are sovereign
+  surfaces; gRPC is a conformance surface (conform to an important client's
+  contract rather than impose ours — cheap because the core is protocol-neutral,
+  so it's another thin adapter).  N×M stability via one source of truth +
+  protobuf wire-compat + versioned packages; semantic conformance (axis order,
+  error kinds) lives in `service-endpoints.md`, not the `.proto`.
+- **gRPC deposit concessions (§12.5).** `DepositRequest` gains `y`, `x`
+  (accepted but IGNORED — full plane served) and `level` (only 0 served; any
+  other REFUSED, never silently downgraded).  gRPC-only.  Safe because of the
+  next item.
+- **Per-axis selection in the descriptor.**  `DepositDescriptor` now reports
+  `selection` — the resolved source indices delivered on **every** axis, in
+  buffer order, as run-length `[start,stop)` ranges (`AxisSelection`/
+  `IndexRange`).  Counts alone can't interpret an arbitrary/non-contiguous 5D
+  subset (`channels:"0,2,5"` → `c:[[0,1],[2,3],[5,6]]`); the selection maps
+  buffer index → source index on each axis.  X/Y are full here but reported
+  anyway so the format is general.  Surfaced on socket (`filled.selection`) and
+  gRPC (`Filled.selection` via new `AxisSelection`/`AxisRange` messages).
+- **Validated:** 394 unit tests green (+`DepositTest` selection RLE,
+  gRPC y/x-ignored + level-refused + selection assertions); buf lint green;
+  MCP smoke 10/10.  Docs: DESIGN §9.4/§12, API-socket.md §5/§7, API-grpc.md.
+
+
 ## Already done
 
 - Project skeleton, Mill build, JUnit 5 tests

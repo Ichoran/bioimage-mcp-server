@@ -1,0 +1,22 @@
+version: v2
+modules:
+  - path: src/proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Deliberate design choices that conflict with STANDARD's naming/layout
+    # conventions (see DESIGN.md §11/§12):
+    #  - the service is a single bidirectional `Session` stream carrying
+    #    oneof ClientMsg/ServerMsg envelopes (clearer than per-RPC
+    #    request/response message types for this design), and
+    #  - the .proto lives flat in src/proto rather than a package-mirroring
+    #    directory tree.
+    - SERVICE_SUFFIX            # service is `BioImage`, not `…Service`
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE

@@ -72,11 +72,9 @@ public final class ExportToTiffTool {
             String inputPath,
             String outputPath,
             Integer series,
-            int[] channels,
-            Integer zStart,
-            Integer zEnd,
-            Integer tStart,
-            Integer tEnd,
+            Slice channels,
+            Slice z,
+            Slice t,
             Compression compression,
             MetadataMode metadataMode,
             Duration timeout,
@@ -98,41 +96,10 @@ public final class ExportToTiffTool {
                 throw new IllegalArgumentException(
                         "series must be non-negative");
             }
-            if (channels != null) {
-                if (channels.length == 0) {
-                    throw new IllegalArgumentException(
-                            "channels array must not be empty");
-                }
-                for (int ch : channels) {
-                    if (ch < 0) {
-                        throw new IllegalArgumentException(
-                                "channel indices must be non-negative");
-                    }
-                }
-            }
-            if (zStart != null && zStart < 0) {
+            if (channels == null || z == null || t == null) {
                 throw new IllegalArgumentException(
-                        "zStart must be non-negative");
-            }
-            if (zEnd != null && zEnd < 0) {
-                throw new IllegalArgumentException(
-                        "zEnd must be non-negative");
-            }
-            if (zStart != null && zEnd != null && zEnd < zStart) {
-                throw new IllegalArgumentException(
-                        "zEnd must be >= zStart");
-            }
-            if (tStart != null && tStart < 0) {
-                throw new IllegalArgumentException(
-                        "tStart must be non-negative");
-            }
-            if (tEnd != null && tEnd < 0) {
-                throw new IllegalArgumentException(
-                        "tEnd must be non-negative");
-            }
-            if (tStart != null && tEnd != null && tEnd < tStart) {
-                throw new IllegalArgumentException(
-                        "tEnd must be >= tStart");
+                        "channels, z, and t selections are required "
+                        + "(use Slice.all() for ':')");
             }
             if (compression == null) {
                 throw new IllegalArgumentException(
@@ -150,21 +117,19 @@ public final class ExportToTiffTool {
                 throw new IllegalArgumentException(
                         "maxBytes must be positive");
             }
-            channels = channels != null ? channels.clone() : null;
         }
 
         /** Full factory with nullable defaults. */
         public static Request of(String inputPath, String outputPath,
-                                  Integer series, int[] channels,
-                                  Integer zStart, Integer zEnd,
-                                  Integer tStart, Integer tEnd,
+                                  Integer series, Slice channels,
+                                  Slice z, Slice t,
                                   Compression compression,
                                   MetadataMode metadataMode,
                                   Duration timeout, Long maxBytes) {
             return new Request(
                     inputPath, outputPath,
                     series, channels,
-                    zStart, zEnd, tStart, tEnd,
+                    z, t,
                     compression != null ? compression : Compression.NONE,
                     metadataMode != null ? metadataMode : MetadataMode.ALL,
                     timeout != null ? timeout : DEFAULT_TIMEOUT,
@@ -173,8 +138,8 @@ public final class ExportToTiffTool {
 
         /** Minimal: export everything with defaults. */
         public static Request of(String inputPath, String outputPath) {
-            return of(inputPath, outputPath,
-                    null, null, null, null, null, null,
+            return of(inputPath, outputPath, null,
+                    Slice.all(), Slice.all(), Slice.all(),
                     null, null, null, null);
         }
     }
@@ -308,46 +273,16 @@ public final class ExportToTiffTool {
                         seriesToExport[0], DetailLevel.STANDARD);
                 var si = meta.detailedSeries();
 
-                // Resolve ranges
-                int zStart = request.zStart() != null
-                        ? request.zStart() : 0;
-                int zEnd = request.zEnd() != null
-                        ? request.zEnd() : si.sizeZ() - 1;
-                int tStart = request.tStart() != null
-                        ? request.tStart() : 0;
-                int tEnd = request.tEnd() != null
-                        ? request.tEnd() : si.sizeT() - 1;
-
-                // Validate ranges
-                if (zEnd >= si.sizeZ()) {
-                    throw new IllegalArgumentException(
-                            "zEnd " + zEnd + " out of range, series has "
-                            + si.sizeZ() + " Z-slice(s)");
-                }
-                if (tEnd >= si.sizeT()) {
-                    throw new IllegalArgumentException(
-                            "tEnd " + tEnd + " out of range, series has "
-                            + si.sizeT() + " timepoint(s)");
-                }
-
-                // Resolve channels
-                int[] channels;
-                if (request.channels() != null) {
-                    for (int ch : request.channels()) {
-                        if (ch >= si.sizeC()) {
-                            throw new IllegalArgumentException(
-                                    "channel " + ch + " out of range,"
-                                    + " series has " + si.sizeC()
-                                    + " channel(s)");
-                        }
-                    }
-                    channels = request.channels();
-                } else {
-                    channels = new int[si.sizeC()];
-                    for (int i = 0; i < si.sizeC(); i++) {
-                        channels[i] = i;
-                    }
-                }
+                // Resolve selections.  The OME-TIFF writer rebuilds TiffData
+                // for a contiguous Z/T span, so z and t must be contiguous
+                // here; channels may be any list.
+                Range zRange = request.z().resolveContiguous(si.sizeZ(), "z");
+                Range tRange = request.t().resolveContiguous(si.sizeT(), "t");
+                int zStart = zRange.start();
+                int zEnd = zRange.end();
+                int tStart = tRange.start();
+                int tEnd = tRange.end();
+                int[] channels = request.channels().resolve(si.sizeC(), "channels");
 
                 // Check byte budget
                 int zCount = zEnd - zStart + 1;

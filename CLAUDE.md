@@ -36,12 +36,22 @@ completed or priorities change.
 # Build system
 
 - **Mill 1.1** is the build tool.
-- The build definition is in `build.mill.yaml` (YAML format, not Scala).
+- The build definition is in `build.mill` (Scala format).  It was converted
+  from the former `build.mill.yaml` because YAML cannot express a custom
+  code-generation task, and the gRPC transport needs one.
 - Main sources are in `src/server/` with package `lab.kerrr.mcpbio.bioimageserver`.
 - The JVM target is Java 21.
 - Bio-Formats is fetched from the OME Maven repository at
   `https://artifacts.openmicroscopy.org/artifactory/maven/`.
-- Tests use JUnit 5 (Jupiter), configured in `test/package.mill.yaml`.
+- **Protobuf/gRPC codegen:** `.proto` files live in `src/proto/`.  A
+  `protocGenerate` task in `build.mill` resolves the `protoc` compiler and the
+  `protoc-gen-grpc-java` plugin from Maven as OS-classified `exe` artifacts (no
+  system protoc needed), runs them, and feeds the generated Java into
+  `generatedSources` (package `…bioimageserver.grpc`).  gRPC, protobuf, and
+  protoc versions are pinned together (grpc 1.81.0 / protobuf 3.25.8); change
+  them in lockstep.
+- The test module is an inner `object test` in `build.mill` (JUnit 5 / Jupiter
+  5.11.4); there is no `test/package.mill.yaml` anymore.
 - Test sources are in `test/src/server/` with the same package as main sources.
 - Run tests with `mill test`.
 

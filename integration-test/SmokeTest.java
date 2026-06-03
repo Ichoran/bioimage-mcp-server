@@ -67,22 +67,23 @@ public class SmokeTest {
                     var result = mapGet(initResponse, "result");
                     var info = mapGet(result, "serverInfo");
                     assertEqual("bioimage-mcp", info.get("name"));
-                    assertEqual("0.1.0", info.get("version"));
+                    assertEqual("0.2.0", info.get("version"));
                 });
 
         // --- Tools list ---
         var toolsResponse = callMethod("tools/list", Map.of());
-        check("tools/list returns 5 tools",
+        check("tools/list returns 6 tools",
                 () -> {
                     var result = mapGet(toolsResponse, "result");
                     var tools = listGet(result, "tools");
-                    assertEqual(5, tools.size());
+                    assertEqual(6, tools.size());
                     var names = tools.stream()
                             .map(t -> (String) ((Map<?, ?>) t).get("name"))
                             .sorted().toList();
                     assertEqual(List.of(
                             "export_to_tiff", "get_intensity_stats",
-                            "get_plane", "get_thumbnail", "inspect_image"),
+                            "get_ome_metadata", "get_plane", "get_thumbnail",
+                            "inspect_image"),
                             names);
                 });
 
@@ -127,9 +128,24 @@ public class SmokeTest {
                             "should contain sizeY");
                 });
 
+        // --- get_ome_metadata ---
+        var omeResult = callTool("get_ome_metadata",
+                Map.of("path", testFile.toString()));
+        check("get_ome_metadata returns a tagged OME-XML document",
+                () -> {
+                    var result = mapGet(omeResult, "result");
+                    assertNotError(result);
+                    var text = firstTextContent(result);
+                    assertTrue(text.contains("ome_xml"),
+                            "should report format ome_xml");
+                    assertTrue(text.contains("OME"),
+                            "should contain the OME-XML document");
+                });
+
         // --- get_thumbnail ---
         var thumbResult = callTool("get_thumbnail",
-                Map.of("path", testFile.toString(), "max_size", 32));
+                Map.of("path", testFile.toString(), "channels", ":",
+                        "max_size", 32));
         check("get_thumbnail returns image content",
                 () -> {
                     var result = mapGet(thumbResult, "result");
@@ -158,7 +174,7 @@ public class SmokeTest {
         // --- get_intensity_stats ---
         var statsResult = callTool("get_intensity_stats",
                 Map.of("path", testFile.toString(),
-                        "channel", 0, "z_slice", 0, "timepoint", 0));
+                        "channels", "0", "z", "0", "t", "0"));
         check("get_intensity_stats returns stats JSON",
                 () -> {
                     var result = mapGet(statsResult, "result");
@@ -174,7 +190,8 @@ public class SmokeTest {
         var outputFile = tempDir.resolve("exported.ome.tiff");
         var exportResult = callTool("export_to_tiff",
                 Map.of("path", testFile.toString(),
-                        "output_path", outputFile.toString()));
+                        "output_path", outputFile.toString(),
+                        "channels", ":", "z", ":", "t", ":"));
         check("export_to_tiff creates output file",
                 () -> {
                     var result = mapGet(exportResult, "result");
