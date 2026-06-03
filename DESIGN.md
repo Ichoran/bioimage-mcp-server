@@ -983,3 +983,25 @@ refusal that writes nothing, and the `max_response_bytes` behavior.  These live
 in the conformance spec — `service-endpoints.md` — which any conforming server
 (ours or a third party's) must satisfy beyond merely compiling against the
 `.proto`.
+
+### 12.5 Accepting a richer contract while reporting reduced capability
+
+A conformance surface must let a client send fields aimed at *more-capable*
+servers without forcing per-server request shapes — provided the server never
+misrepresents what it did.  The gRPC `DepositRequest` does exactly this with
+three fields it does not honor:
+
+- **`y` / `x` sub-ranges** — accepted but ignored (Bio-Formats is plane-based, so
+  the full plane is served).  No deception is possible because the `Filled`
+  descriptor's `shape` reports the actual extent on every axis; a client that
+  asked for a sub-range sees the full extent it received.
+- **`level`** (pyramid tier) — only level 0 (full resolution) is served; a
+  non-zero level is **refused**, never silently downgraded.  Silently serving
+  level 0 for a level-2 request would be false confidence (§ Project outlook);
+  an explicit refusal is the honest outcome.
+
+The rule that makes this safe is the same one that governs the whole project:
+**always report what was actually delivered, on every axis.**  Given that, a
+server may accept a superset of the protocol it implements — the descriptor, not
+the request, is the source of truth.  These concessions are gRPC-only; the
+sovereign socket/HTTP surfaces carry only what they implement.

@@ -120,6 +120,28 @@ class BioImageGrpcServiceTest {
             for (byte b : bytes) if (b != 0) { nonZero = true; break; }
             assertTrue(nonZero, "deposited region should contain pixel data");
 
+            // y/x sub-ranges are accepted but IGNORED: the dry-run descriptor
+            // reports the full plane (shape.x/y), not the requested sub-range.
+            client.onNext(ClientMsg.newBuilder().setId("d2")
+                    .setDeposit(DepositRequest.newBuilder()
+                            .setHandle(handle).setChannels(":").setZ(":").setT(":")
+                            .setY("1:2").setX("1:2").setDryRun(true))
+                    .build());
+            ServerMsg ignored = collector.take();
+            assertEquals(ServerMsg.MsgCase.FILLED, ignored.getMsgCase());
+            assertEquals(X, ignored.getFilled().getSizeX(), "x sub-range ignored: full X");
+            assertEquals(Y, ignored.getFilled().getSizeY(), "y sub-range ignored: full Y");
+
+            // A non-zero pyramid level is REFUSED, never silently downgraded.
+            client.onNext(ClientMsg.newBuilder().setId("d3")
+                    .setDeposit(DepositRequest.newBuilder()
+                            .setHandle(handle).setChannels(":").setZ(":").setT(":")
+                            .setLevel(2).setDryRun(true))
+                    .build());
+            ServerMsg lvl = collector.take();
+            assertEquals(ServerMsg.MsgCase.ERROR, lvl.getMsgCase());
+            assertEquals("invalid_argument", lvl.getError().getErrorKind());
+
             // Close → closed; reader released.
             client.onNext(ClientMsg.newBuilder().setId("c1")
                     .setClose(CloseSession.newBuilder().setHandle(handle)).build());

@@ -392,6 +392,20 @@ public final class BioImageGrpcService {
                         "a deposit is already in flight on this stream"));
                 return;
             }
+            // Pyramid level: we serve only full resolution.  Refuse any other
+            // level rather than silently downgrading to 0 (that would be false
+            // confidence — the client would think it got a downsampled tier).
+            if (req.getLevel() != 0) {
+                send(error(id, "invalid_argument",
+                        "this server serves only pyramid level 0 (full resolution); "
+                        + "requested level " + req.getLevel()));
+                return;
+            }
+            // The `y`/`x` sub-range fields are accepted for protocol
+            // compatibility but ignored: Bio-Formats is plane-based, so the full
+            // Y/X plane is always deposited.  We do not translate them into the
+            // service args; the Filled descriptor's shape.y/shape.x report the
+            // actual extent served, so the client can see it got the whole plane.
             var args = new LinkedHashMap<String, Object>();
             putSource(args, req.getPath(), req.getHandle());
             if (req.hasSeries()) args.put("series", req.getSeries());

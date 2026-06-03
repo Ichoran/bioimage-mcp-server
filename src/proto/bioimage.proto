@@ -102,6 +102,20 @@ message DepositRequest {
   optional bool dry_run = 7;
   DepositTarget target = 8;        // omit when dry_run
   optional int32 timeout_seconds = 9;
+
+  // Fields below are protocol concessions for clients that also talk to
+  // more-capable servers.  This server does not honor them, but it never
+  // pretends to: the Filled descriptor's `shape` always reports what was
+  // ACTUALLY delivered on every axis, so a client can detect the difference.
+  string y = 10;                   // y sub-range: ACCEPTED BUT IGNORED — this
+  string x = 11;                   // x sub-range: ACCEPTED BUT IGNORED — server
+                                   //   is plane-based (Bio-Formats), so the full
+                                   //   Y/X plane is always served; shape.y/shape.x
+                                   //   in the reply report the real extent.
+  optional int32 level = 12;       // pyramid level; 0 (default) = full resolution.
+                                   //   Only level 0 is served; any other level is
+                                   //   REFUSED (invalid_argument) — never silently
+                                   //   downgraded to 0.
 }
 
 message DepositTarget {

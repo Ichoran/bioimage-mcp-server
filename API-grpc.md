@@ -100,6 +100,25 @@ example.  The `Filled` message fields mirror the socket `filled` descriptor.
 Stateless use (no session) is also supported: send any read op with `path`
 set instead of `handle`.
 
+### 4a. Deposit capability concessions (gRPC only)
+
+`DepositRequest` carries three fields that exist so a client which also talks to
+**more-capable** servers can use one request shape everywhere.  This server does
+not honor them — but it never pretends to: the `Filled` descriptor's `shape`
+always reports what was **actually delivered on every axis**, so the client
+compares its request to the descriptor and sees the difference.
+
+- **`y`, `x`** (slice strings) — **accepted but ignored.**  Bio-Formats is
+  plane-based, so the full Y/X plane is always deposited; `shape.y` / `shape.x`
+  in the reply report the real (full) extent, not your sub-range.
+- **`level`** (int, default `0`) — pyramid level.  Only **level 0**
+  (full resolution) is served.  Any non-zero level is **refused** with
+  `invalid_argument` — never silently downgraded to 0, which would falsely imply
+  you received a downsampled tier.
+
+These fields are gRPC-only (the socket/HTTP deposit surfaces don't carry them).
+See DESIGN.md §12 for the governance rationale.
+
 ## 5. Lifetime & disconnect
 
 A handle is valid only on the stream that opened it.  When the client
