@@ -29,8 +29,9 @@ import java.util.Map;
  * {@link BioImageService}, which is shared with other adapters such as
  * {@link BioImageHttpService}.
  *
- * <p>Registers five tools: {@code inspect_image}, {@code get_thumbnail},
- * {@code get_plane}, {@code get_intensity_stats}, and {@code export_to_tiff}.
+ * <p>Registers six tools: {@code inspect_image}, {@code get_ome_metadata},
+ * {@code get_thumbnail}, {@code get_plane}, {@code get_intensity_stats}, and
+ * {@code export_to_tiff}.
  *
  * @see BioImageService
  * @see PathAccessControl
@@ -53,7 +54,8 @@ public class BioImageMcpServer {
             1. inspect_image first — learn dimensions, channels, pixel type, \
             and physical pixel sizes.  Start with 'summary' detail; request \
             'standard' for wavelengths/instrument info, 'full' only if \
-            the user needs raw per-plane metadata.
+            the user needs raw per-plane metadata.  For the complete, portable \
+            metadata document (OME-XML), use get_ome_metadata.
             2. get_thumbnail for a quick RGB overview (auto-composites \
             channels, auto-projects Z).
             3. get_plane to examine a single channel/Z/timepoint at full \
@@ -165,6 +167,7 @@ public class BioImageMcpServer {
                 .rootsChangeHandler(this::onRootsChanged)
                 .tools(
                         inspectImageSpec(),
+                        getOmeMetadataSpec(),
                         getThumbnailSpec(),
                         getPlaneSpec(),
                         getIntensityStatsSpec(),
@@ -226,6 +229,30 @@ public class BioImageMcpServer {
                         .build())
                 .callHandler((exchange, request) ->
                         handleInspectImage(request.arguments()))
+                .build();
+    }
+
+    private SyncToolSpecification getOmeMetadataSpec() {
+        return SyncToolSpecification.builder()
+                .tool(McpSchema.Tool.builder()
+                        .name("get_ome_metadata")
+                        .description("Return the file's full extended metadata as a "
+                                + "portable, format-tagged document: a 'format' "
+                                + "identifier ('ome_xml', or 'ome_ngff' if the "
+                                + "reader provides it) and the 'content' string "
+                                + "(OME-XML / OME-NGFF JSON). This is the complete "
+                                + "OME metadata Bio-Formats synthesizes — more "
+                                + "exhaustive than inspect_image's parsed fields, "
+                                + "and the most portable way to hand the metadata "
+                                + "to other tools. Capped by max_response_bytes "
+                                + "(default 256 KB) since it can be large; raise "
+                                + "the cap to retrieve a bigger document.")
+                        .inputSchema(getOmeMetadataSchema())
+                        .annotations(new McpSchema.ToolAnnotations(
+                                null, true, false, true, false, false))
+                        .build())
+                .callHandler((exchange, request) ->
+                        handleGetOmeMetadata(request.arguments()))
                 .build();
     }
 
@@ -343,6 +370,24 @@ public class BioImageMcpServer {
                 "description", "Approximate cap on response size in bytes "
                         + "(default: 65536). If metadata exceeds this, "
                         + "the detail level is automatically downgraded."));
+        return new McpSchema.JsonSchema(
+                "object", props, List.of("path"), false, null, null);
+    }
+
+    /** Default size cap for get_ome_metadata on MCP (the document enters context). */
+    private static final long DEFAULT_OME_METADATA_MAX_BYTES = 262144;  // 256 KB
+
+    private static McpSchema.JsonSchema getOmeMetadataSchema() {
+        var props = new LinkedHashMap<String, Object>();
+        props.put("path", Map.of(
+                "type", "string",
+                "description", "Absolute path to the microscopy image file"));
+        props.put("max_response_bytes", Map.of(
+                "type", "integer",
+                "description", "Cap on the document size in bytes (default: "
+                        + DEFAULT_OME_METADATA_MAX_BYTES + "). A document larger "
+                        + "than this is an error reporting the actual size (it is "
+                        + "never truncated); raise the cap to retrieve it."));
         return new McpSchema.JsonSchema(
                 "object", props, List.of("path"), false, null, null);
     }
@@ -525,6 +570,19 @@ public class BioImageMcpServer {
             case ToolResult.Success<ImageMetadata> s ->
                 jsonResult(JsonUtil.toMap(s.value()));
             case ToolResult.Failure<ImageMetadata> f -> errorResult(f);
+        };
+    }
+
+    private CallToolResult handleGetOmeMetadata(Map<String, Object> args) {
+        // Apply a conservative default size cap for MCP (the document goes into
+        // the LLM context); callers can override max_response_bytes.
+        if (!args.containsKey("max_response_bytes")) {
+            args = new LinkedHashMap<>(args);
+            args.put("max_response_bytes", DEFAULT_OME_METADATA_MAX_BYTES);
+        }
+        return switch (service.getOmeMetadata(args)) {
+            case ToolResult.Success<OmeMetadata> s -> jsonResult(JsonUtil.toMap(s.value()));
+            case ToolResult.Failure<OmeMetadata> f -> errorResult(f);
         };
     }
 

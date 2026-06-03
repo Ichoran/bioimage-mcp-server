@@ -91,6 +91,14 @@ class BioImageGrpcServiceTest {
             assertEquals(ServerMsg.MsgCase.JSON, inspected.getMsgCase());
             assertTrue(inspected.getJson().getJson().contains("\"sizeX\""));
 
+            // OME metadata by handle → format-tagged document.
+            client.onNext(ClientMsg.newBuilder().setId("m1")
+                    .setOmeMetadata(OmeMetadataRequest.newBuilder().setHandle(handle)).build());
+            ServerMsg meta = collector.take();
+            assertEquals(ServerMsg.MsgCase.OME_METADATA, meta.getMsgCase());
+            assertEquals("ome_xml", meta.getOmeMetadata().getFormat());
+            assertTrue(meta.getOmeMetadata().getContent().contains("<OME"));
+
             // Deposit by handle into a shared-memory-style region.
             long total = (long) X * Y * Z * C * T;
             Path tgt = dir.resolve("shm.bin");

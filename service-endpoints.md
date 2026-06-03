@@ -26,6 +26,7 @@ The core operations are the same; each transport exposes a subset.
 | Operation             | Returns                    | MCP | HTTP | Socket | gRPC |
 |-----------------------|----------------------------|:---:|:----:|:------:|:----:|
 | `inspect_image`       | metadata (JSON)            |  ✓  |  ✓   |   ✓    |  ✓   |
+| `get_ome_metadata`    | tagged document (JSON)     |  ✓  |  ✓   |   ✓    |  ✓   |
 | `get_thumbnail`       | RGB PNG                    |  ✓  |  ✓   |   ✓    |  ✓   |
 | `get_plane`           | grayscale PNG              |  ✓  |  ✓   |   ✓    |  ✓   |
 | `get_intensity_stats` | statistics (JSON)          |  ✓  |  ✓   |   ✓    |  ✓   |
@@ -36,8 +37,8 @@ The core operations are the same; each transport exposes a subset.
 **Sessions (socket + gRPC only).** The two persistent-connection transports
 let a client `open` an image once — receiving a **handle** plus a SUMMARY
 metadata snapshot — and then address subsequent read operations
-(`inspect_image`, `get_plane`, `get_intensity_stats`, `get_thumbnail`,
-`deposit`) by that handle (in place of `path`), reusing one already-open
+(`inspect_image`, `get_ome_metadata`, `get_plane`, `get_intensity_stats`,
+`get_thumbnail`, `deposit`) by that handle (in place of `path`), reusing one already-open
 reader instead of re-opening and re-parsing the file each call.  A session is
 owned by the connection that opened it: when the client sends `close`, or the
 connection drops, the kept-open reader is closed.  See §3.7 and the
@@ -103,6 +104,36 @@ with the stated default.
 | `detail`             | enum   | `standard` | `summary` \| `standard` \| `full` |
 | `timeout_seconds`    | int    | `30`       | |
 | `max_response_bytes` | int    | `65536`    | over this, detail level is downgraded |
+
+### 3.1a `get_ome_metadata` → tagged metadata document JSON
+
+Returns the file's complete extended metadata as a **format-tagged document** —
+more exhaustive than `inspect_image`'s parsed fields, and the most portable way
+to hand metadata to other tools. The result is two strings:
+
+- `format` — `ome_xml` (the universal case; Bio-Formats synthesizes OME-XML for
+  essentially every file) or `ome_ngff` (OME-Zarr JSON, only if a reader
+  supplies a native block — see the note below).
+- `content` — the document itself (OME-XML or OME-NGFF JSON).
+
+| Param                | Type   | Default | Notes |
+|----------------------|--------|---------|-------|
+| `path`               | string | —       | **required** source (or use `handle`) |
+| `handle`             | string | —       | session handle; alternative to `path` (socket/gRPC) |
+| `max_response_bytes` | int    | none*   | size cap; over it → `INVALID_ARGUMENT` reporting the actual size |
+| `timeout_seconds`    | int    | `30`    | |
+
+\* The MCP transport defaults the cap to 256 KB (the document enters the LLM
+context); HTTP/socket/gRPC apply no cap unless you set one. A document larger
+than the cap is **never truncated** (a partial XML/JSON would be corrupt) — the
+call fails with the byte size so you can raise the cap.
+
+> **OME-NGFF note.** Bio-Formats core does not expose a native NGFF/`.zattrs`
+> JSON block: reading OME-Zarr needs the separate `OMEZarrReader` add-on, and
+> even then Bio-Formats normalizes through its OME model (→ OME-XML). So in
+> practice `format` is `ome_xml`; `ome_ngff` is reserved for a future reader (or
+> synthesis step) that can supply it, and the tagged envelope lets it slot in
+> with no wire change.
 
 ### 3.2 `get_thumbnail` → RGB PNG
 
@@ -189,8 +220,8 @@ details in **[API-socket.md](API-socket.md)**.
 
 `open` keeps a reader open and returns a `handle` plus a SUMMARY metadata
 snapshot; `close` releases it.  Any of the read operations above
-(`inspect_image`, `get_plane`, `get_intensity_stats`, `get_thumbnail`,
-`deposit`) may then pass `handle` **instead of** `path` to run against the
+(`inspect_image`, `get_ome_metadata`, `get_plane`, `get_intensity_stats`,
+`get_thumbnail`, `deposit`) may then pass `handle` **instead of** `path` to run against the
 already-open reader.  Operations on one handle are serialized (Bio-Formats
 readers are not thread-safe).
 

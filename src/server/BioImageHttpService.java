@@ -151,6 +151,8 @@ public final class BioImageHttpService {
 
         server.createContext("/inspect_image",
                 ex -> handleJson(ex, service::inspectImage, JsonUtil::toMap));
+        server.createContext("/get_ome_metadata",
+                ex -> handleJson(ex, service::getOmeMetadata, JsonUtil::toMap));
         server.createContext("/get_intensity_stats",
                 ex -> handleJson(ex, service::getIntensityStats, JsonUtil::toMap));
         server.createContext("/export_to_tiff",
@@ -242,7 +244,8 @@ public final class BioImageHttpService {
         info.put("version", VERSION);
         info.put("status", "ok");
         info.put("endpoints", List.of(
-                "POST /inspect_image", "POST /get_thumbnail", "POST /get_plane",
+                "POST /inspect_image", "POST /get_ome_metadata",
+                "POST /get_thumbnail", "POST /get_plane",
                 "POST /get_intensity_stats", "POST /export_to_tiff"));
         writeJson(ex, 200, info);
     }

@@ -74,7 +74,7 @@ class DepositTest {
     }
 
     @Test
-    void depositWritesExpectedBytesInTZCYXOrder(@TempDir Path dir) throws Exception {
+    void depositWritesExpectedBytesInTCZYXOrder(@TempDir Path dir) throws Exception {
         var service = serviceFor(dir, C);
         var src = touch(dir, "src.fake");
         long total = (long) X * Y * Z * C * T;          // uint8 ⇒ 1 byte/sample
@@ -98,14 +98,14 @@ class DepositTest {
         byte[] bytes = Files.readAllBytes(tgt);
         assertEquals(total, bytes.length);
         for (int t = 0; t < T; t++) {
-            for (int z = 0; z < Z; z++) {
-                for (int c = 0; c < C; c++) {
-                    long planeOffset = (((long) t * Z + z) * C + c) * X * Y;
+            for (int c = 0; c < C; c++) {
+                for (int z = 0; z < Z; z++) {
+                    long planeOffset = (((long) t * C + c) * Z + z) * X * Y;
                     for (int y = 0; y < Y; y++) {
                         for (int x = 0; x < X; x++) {
                             int got = bytes[(int) (planeOffset + (long) y * X + x)] & 0xFF;
                             assertEquals(expected(x, y, c, z, t), got,
-                                    "byte at (t=" + t + ",z=" + z + ",c=" + c
+                                    "byte at (t=" + t + ",c=" + c + ",z=" + z
                                     + ",y=" + y + ",x=" + x + ")");
                         }
                     }
@@ -129,11 +129,11 @@ class DepositTest {
         assertEquals(sc, d.sizeC());
 
         byte[] bytes = Files.readAllBytes(tgt);
-        // Spot-check that channel is the inner-of-plane axis: the same (x,y,z,t)
-        // across channels differs by c*7, contiguous plane-by-plane.
-        for (int z = 0; z < Z; z++) {
-            for (int c = 0; c < sc; c++) {
-                long planeOffset = (((long) 0 * Z + z) * sc + c) * X * Y;
+        // Spot-check the NGFF [t,c,z,y,x] order: C is OUTER of Z, so each
+        // channel's full Z-stack is a contiguous block (channel-major).
+        for (int c = 0; c < sc; c++) {
+            for (int z = 0; z < Z; z++) {
+                long planeOffset = (((long) 0 * sc + c) * Z + z) * X * Y;
                 assertEquals(expected(0, 0, c, z, 0),
                         bytes[(int) planeOffset] & 0xFF,
                         "plane origin (c=" + c + ",z=" + z + ")");

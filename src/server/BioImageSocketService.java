@@ -398,7 +398,7 @@ public final class BioImageSocketService {
     private static boolean isSyncOp(String type) {
         return switch (type == null ? "" : type) {
             case "open", "close", "inspect", "get_intensity_stats",
-                 "get_plane", "get_thumbnail" -> true;
+                 "get_plane", "get_thumbnail", "get_ome_metadata" -> true;
             default -> false;
         };
     }
@@ -460,6 +460,11 @@ public final class BioImageSocketService {
                     case ToolResult.Failure<GetThumbnailTool.ThumbnailResult> f ->
                             errorOf(id, f);
                 };
+            case "get_ome_metadata":
+                return switch (service.getOmeMetadata(msg)) {
+                    case ToolResult.Success<OmeMetadata> s -> omeMetadata(id, s.value());
+                    case ToolResult.Failure<OmeMetadata> f -> errorOf(id, f);
+                };
             default:
                 return error(id, "invalid_argument", "unsupported sync op: " + type);
         }
@@ -474,6 +479,14 @@ public final class BioImageSocketService {
         map.put("type", "session_opened");
         if (id != null) map.put("id", id);
         map.putAll(JsonUtil.toMap(info));   // handle + summary
+        return JsonUtil.toJson(map);
+    }
+
+    private static String omeMetadata(String id, OmeMetadata m) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("type", "ome_metadata");
+        if (id != null) map.put("id", id);
+        map.putAll(JsonUtil.toMap(m));   // format + content
         return JsonUtil.toJson(map);
     }
 

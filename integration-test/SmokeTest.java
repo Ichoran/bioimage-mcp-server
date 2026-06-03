@@ -72,17 +72,18 @@ public class SmokeTest {
 
         // --- Tools list ---
         var toolsResponse = callMethod("tools/list", Map.of());
-        check("tools/list returns 5 tools",
+        check("tools/list returns 6 tools",
                 () -> {
                     var result = mapGet(toolsResponse, "result");
                     var tools = listGet(result, "tools");
-                    assertEqual(5, tools.size());
+                    assertEqual(6, tools.size());
                     var names = tools.stream()
                             .map(t -> (String) ((Map<?, ?>) t).get("name"))
                             .sorted().toList();
                     assertEqual(List.of(
                             "export_to_tiff", "get_intensity_stats",
-                            "get_plane", "get_thumbnail", "inspect_image"),
+                            "get_ome_metadata", "get_plane", "get_thumbnail",
+                            "inspect_image"),
                             names);
                 });
 
@@ -125,6 +126,20 @@ public class SmokeTest {
                             "should contain sizeX");
                     assertTrue(content.contains("sizeY"),
                             "should contain sizeY");
+                });
+
+        // --- get_ome_metadata ---
+        var omeResult = callTool("get_ome_metadata",
+                Map.of("path", testFile.toString()));
+        check("get_ome_metadata returns a tagged OME-XML document",
+                () -> {
+                    var result = mapGet(omeResult, "result");
+                    assertNotError(result);
+                    var text = firstTextContent(result);
+                    assertTrue(text.contains("ome_xml"),
+                            "should report format ome_xml");
+                    assertTrue(text.contains("OME"),
+                            "should contain the OME-XML document");
                 });
 
         // --- get_thumbnail ---

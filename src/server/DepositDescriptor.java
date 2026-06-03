@@ -7,14 +7,17 @@ package lab.kerrr.mcpbio.bioimageserver;
  * <p>The descriptor is fully self-describing: a client that has the region
  * mapped can interpret every byte from these fields alone, without having
  * inspected the source file.  Pixels are written in <b>C-order with X
- * fastest and T slowest</b> — the element at {@code (t, z, c, y, x)} (all
+ * fastest and T slowest</b>, in the NGFF / OME-Zarr canonical axis order
+ * {@code [t, c, z, y, x]} — the element at {@code (t, c, z, y, x)} (all
  * indices relative to the deposited selection, not the source file) lives
  * at byte offset
  * <pre>
- *   ((((t*sizeZ + z)*sizeC + c)*sizeY + y)*sizeX + x) * bytesPerSample
+ *   ((((t*sizeC + c)*sizeZ + z)*sizeY + y)*sizeX + x) * bytesPerSample
  * </pre>
- * Each {@code readPlane} result is one {@code (t,z,c)} plane of
- * {@code sizeY*sizeX} samples in row-major order, copied verbatim.
+ * Each {@code readPlane} result is one {@code (t,c,z)} plane of
+ * {@code sizeY*sizeX} samples in row-major order, copied verbatim.  This is
+ * the order an OME-Zarr / NGFF consumer (napari, zarr, dask) expects, so a
+ * mapped region drops in without a transpose.
  *
  * <p>Bytes are written in the source file's native order;
  * {@link #littleEndian} reports which that is (not forced).
@@ -46,7 +49,10 @@ public record DepositDescriptor(
         int sizeZ,
         int sizeT) {
 
-    /** The fixed axis order of the buffer, outermost (slowest) first. */
+    /**
+     * The fixed axis order of the buffer, outermost (slowest) first.
+     * This is the NGFF / OME-Zarr canonical order {@code [t, c, z, y, x]}.
+     */
     public static final java.util.List<String> AXIS_ORDER =
-            java.util.List.of("t", "z", "c", "y", "x");
+            java.util.List.of("t", "c", "z", "y", "x");
 }

@@ -236,6 +236,34 @@ The `inspect_image` tool does not need a `budget` parameter because its metadata
 detail levels (§2.1) already control response size, and metadata extraction is
 fast even for large files.
 
+### 2.7 `get_ome_metadata`
+
+**Purpose:** Return the file's complete extended metadata as a portable,
+**format-tagged document** — the raw OME metadata block rather than the parsed
+fields `inspect_image` returns.
+
+**Output (JSON):** two strings — `format` (`ome_xml` or `ome_ngff`) and
+`content` (the document). Bio-Formats synthesizes OME-XML from its OME model
+for essentially every file it reads, so `ome_xml` is the universal case; this
+is the most portable way to hand a file's metadata to other tools.
+
+**Why a tagged `(format, content)` pair rather than just XML:** it keeps the
+wire protocol stable as the representation evolves. A reader that can supply a
+native **OME-NGFF** (OME-Zarr) JSON block — or a future synthesis step — returns
+`ome_ngff` + JSON through the identical envelope, with no protocol change.
+(Bio-Formats core cannot supply NGFF today: reading OME-Zarr needs the separate
+`OMEZarrReader` add-on, and even then it normalizes through the OME model → OME-XML.)
+
+**Size:** the document can be large (per-plane metadata), and unlike a pixel
+read it cannot be meaningfully truncated — a partial XML/JSON is corrupt. So an
+optional `max_response_bytes` cap turns an over-size document into an error that
+reports the actual size (raise the cap to retrieve it) rather than a partial
+result. The MCP transport defaults this cap (the document enters the LLM
+context); the microservice transports do not.
+
+The reader seam is `ImageReader.getMetadataBlock()`, whose default derives an
+`ome_xml` block from `getOMEXML()`; a format-specific reader overrides it.
+
 
 ## 3. Technology Choices
 
@@ -670,15 +698,23 @@ lifecycle management is entirely the client's.
 
 ### 9.3 Buffer layout
 
-Pixels are written in **C-order with X fastest and T slowest**; axis order
-is `["t","z","c","y","x"]`.  The element at `(t,z,c,y,x)` — indices relative
-to the *deposited selection*, not the source file — lives at byte offset
+Pixels are written in **C-order with X fastest and T slowest**, in the
+**NGFF / OME-Zarr canonical axis order** `["t","c","z","y","x"]` (time, then
+channel, then the spatial axes).  The element at `(t,c,z,y,x)` — indices
+relative to the *deposited selection*, not the source file — lives at byte
+offset
 
 ```
-((((t*sizeZ + z)*sizeC + c)*sizeY + y)*sizeX + x) * bytesPerSample
+((((t*sizeC + c)*sizeZ + z)*sizeY + y)*sizeX + x) * bytesPerSample
 ```
 
-Each `readPlane` result is one `(t,z,c)` plane of `sizeY*sizeX` samples in
+We deliberately normalize to this order (not the source file's arbitrary
+`dimensionOrder`, which is generally not NGFF-compliant) so a mapped region
+drops straight into an OME-Zarr / NGFF consumer (napari, zarr, dask) without
+a transpose, and each channel's full Z-stack is a contiguous (channel-major)
+block.
+
+Each `readPlane` result is one `(t,c,z)` plane of `sizeY*sizeX` samples in
 row-major order, copied verbatim at `planeIndex * planeBytes`.  A "volume"
 is simply a deposit with a full Z-range and a single channel/timepoint;
 there is no native multi-plane read in Bio-Formats, so the server loops
@@ -714,7 +750,7 @@ Set `"dry_run":true` (and omit `target`) to get the descriptor — with
 {"type":"filled","id":"c1",
  "offset":0,"total_bytes":43352064,"plane_bytes":688128,
  "pixel_type":"uint16","bytes_per_sample":2,"signed":false,"little_endian":true,
- "axis_order":["t","z","c","y","x"],
+ "axis_order":["t","c","z","y","x"],
  "shape":{"x":672,"y":512,"c":1,"z":21,"t":1}}
 ```
 

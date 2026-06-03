@@ -57,11 +57,12 @@ service BioImage {
 The full schema is `src/proto/bioimage.proto` (generated into the
 `lab.kerrr.mcpbio.bioimageserver.grpc` Java package).  One `Session` stream =
 one connection.  On open, the server sends a `Ready`.  `ClientMsg` is a
-`oneof` of `OpenSession`, `CloseSession`, `InspectRequest`, `PlaneRequest`,
-`StatsRequest`, `ThumbnailRequest`, `DepositRequest`, `ShutdownRequest`; each
-carries a client-chosen `id` echoed on the reply.  `ServerMsg` is a `oneof` of
-`Ready`, `SessionOpened`, `JsonResult`, `PngResult`, `Filled`, `Closed`,
-`ShutdownOk`, `Error`.
+`oneof` of `OpenSession`, `CloseSession`, `InspectRequest`,
+`OmeMetadataRequest`, `PlaneRequest`, `StatsRequest`, `ThumbnailRequest`,
+`DepositRequest`, `ShutdownRequest`; each carries a client-chosen `id` echoed
+on the reply.  `ServerMsg` is a `oneof` of `Ready`, `SessionOpened`,
+`JsonResult`, `PngResult`, `OmeMetadataResult` (`{format, content}`), `Filled`,
+`Closed`, `ShutdownOk`, `Error`.
 
 - Slice selections (`channels`/`z`/`t`/`channel`) are the same **strings**
   used everywhere (`":"`, `"0,2"`, `"4:9"`); an **empty** string means "not

@@ -235,6 +235,7 @@ public final class BioImageGrpcService {
                 case PLANE -> handlePlane(id, msg.getPlane());
                 case THUMBNAIL -> handleThumbnail(id, msg.getThumbnail());
                 case DEPOSIT -> handleDeposit(id, msg.getDeposit());
+                case OME_METADATA -> handleOmeMetadata(id, msg.getOmeMetadata());
                 case SHUTDOWN -> handleShutdown(id);
                 case MSG_NOT_SET -> send(error(id, "invalid_argument",
                         "empty client message (no operation set)"));
@@ -365,6 +366,23 @@ public final class BioImageGrpcService {
                                 s.value().projectionUsed().name().toLowerCase()));
                 case ToolResult.Failure<GetThumbnailTool.ThumbnailResult> f ->
                         send(errorOf(id, f));
+            }
+        }
+
+        private void handleOmeMetadata(String id, OmeMetadataRequest req) {
+            var args = new LinkedHashMap<String, Object>();
+            putSource(args, req.getPath(), req.getHandle());
+            if (req.hasMaxResponseBytes()) {
+                args.put("max_response_bytes", req.getMaxResponseBytes());
+            }
+            switch (service.getOmeMetadata(args)) {
+                case ToolResult.Success<OmeMetadata> s -> send(ServerMsg.newBuilder()
+                        .setId(id)
+                        .setOmeMetadata(OmeMetadataResult.newBuilder()
+                                .setFormat(s.value().format())
+                                .setContent(s.value().content()))
+                        .build());
+                case ToolResult.Failure<OmeMetadata> f -> send(errorOf(id, f));
             }
         }
 

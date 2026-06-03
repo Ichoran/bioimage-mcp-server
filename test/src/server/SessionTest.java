@@ -43,6 +43,8 @@ class SessionTest {
         @Override public byte[] readPlane(int s, int c, int z, int t) throws IOException {
             return delegate.readPlane(s, c, z, t);
         }
+        @Override public String getOMEXML() { return delegate.getOMEXML(); }
+        @Override public int getOriginalMetadataCount() { return delegate.getOriginalMetadataCount(); }
         @Override public void close() throws IOException { closes.incrementAndGet(); delegate.close(); }
     }
 
@@ -161,6 +163,33 @@ class SessionTest {
         assertInstanceOf(ToolResult.Success.class, h.service().closeSession(handle));
         assertInstanceOf(ToolResult.Success.class, h.service().closeSession("never-existed"));
         assertEquals(1, h.closed().get(), "no double close");
+    }
+
+    @Test
+    void omeMetadataByPathAndHandleAndCap(@TempDir Path dir) throws Exception {
+        var h = harnessFor(dir);
+        var src = touch(dir, "src.fake");
+
+        // By path (stateless).
+        var byPath = h.service().getOmeMetadata(args("path", src.toString()));
+        var m = assertInstanceOf(ToolResult.Success.class, byPath);
+        var doc = (OmeMetadata) ((ToolResult.Success<?>) byPath).value();
+        assertEquals("ome_xml", doc.format());
+        assertTrue(doc.content().contains("<OME"), "content should be OME-XML");
+
+        // By handle (reuses the open reader).
+        String handle = openHandle(h.service(), src);
+        var byHandle = h.service().getOmeMetadata(args("handle", handle));
+        assertInstanceOf(ToolResult.Success.class, byHandle);
+        assertEquals("ome_xml",
+                ((OmeMetadata) ((ToolResult.Success<?>) byHandle).value()).format());
+
+        // Cap too small -> INVALID_ARGUMENT, never a truncated document.
+        var capped = h.service().getOmeMetadata(
+                args("path", src.toString(), "max_response_bytes", 1));
+        assertInstanceOf(ToolResult.Failure.class, capped);
+        assertEquals(ToolResult.ErrorKind.INVALID_ARGUMENT,
+                ((ToolResult.Failure<?>) capped).kind());
     }
 
     @Test

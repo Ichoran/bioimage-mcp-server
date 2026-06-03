@@ -242,6 +242,17 @@ final class JsonUtil {
     }
 
     // ================================================================
+    // OmeMetadata
+    // ================================================================
+
+    static Map<String, Object> toMap(OmeMetadata m) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("format", m.format());
+        map.put("content", m.content());
+        return map;
+    }
+
+    // ================================================================
     // SessionInfo
     // ================================================================
 

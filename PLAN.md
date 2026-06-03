@@ -193,6 +193,36 @@ Full spec in DESIGN.md §10 (sessions) and §11 (gRPC).
 - Expose sessions on a future stateful HTTP variant if ever needed.
 
 
+## Phase 13: NGFF-order deposit + portable metadata document — done
+
+- **TCZYX deposit layout.** The shared-memory deposit now writes pixels in the
+  NGFF / OME-Zarr canonical axis order `[t,c,z,y,x]` (was `[t,z,c,y,x]`), so a
+  mapped region drops into napari/zarr/dask without a transpose and each
+  channel's Z-stack is a contiguous (channel-major) block.  We normalize to
+  this order regardless of the source file's arbitrary `dimensionOrder`.
+  Changed: the `depositInto` loop nesting + offset, `DepositDescriptor`
+  (AXIS_ORDER + javadoc), `DepositTest` (multichannel offset + rename), DESIGN
+  §9.3/§9.4, API-socket.md §7 (formula, axis_order, NumPy shape), API-grpc.md.
+  **Breaking** wire-layout change (descriptor's `axis_order` self-documents it).
+- **`get_ome_metadata` operation.** Returns the file's full extended metadata as
+  a portable, format-tagged `{format, content}` document — `ome_xml` (the
+  universal case, synthesized by Bio-Formats) today, `ome_ngff` reserved for a
+  reader that can supply a native OME-Zarr JSON block (Bio-Formats core can't —
+  it needs the `OMEZarrReader` add-on and still normalizes through the OME
+  model).  The tagged envelope means NGFF slots in with no wire change.  New
+  `OmeMetadata` record + `ImageReader.getMetadataBlock()` default (derives the
+  `ome_xml` block from `getOMEXML()`); `BioImageService.getOmeMetadata` with
+  handle/path routing and a `max_response_bytes` cap (over-size → INVALID_ARGUMENT
+  reporting the byte count; never truncated).  Exposed on all four transports:
+  MCP tool (default 256 KB cap, since it enters context), HTTP `POST
+  /get_ome_metadata`, socket `get_ome_metadata` op, gRPC
+  `OmeMetadataRequest`/`OmeMetadataResult`.
+- **Validated:** 393 unit tests green (+`SessionTest.omeMetadataByPathAndHandleAndCap`,
+  plus get_ome_metadata round-trips folded into the gRPC and socket integration
+  tests; DepositTest updated for TCZYX).  Docs updated: DESIGN §2.7 + §9,
+  service-endpoints.md, API-socket.md, API-grpc.md, README, this file.
+
+
 ## Already done
 
 - Project skeleton, Mill build, JUnit 5 tests

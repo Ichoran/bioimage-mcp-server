@@ -142,7 +142,7 @@ You can skip the dry run if you already know the exact size (e.g. from an
 {"type":"filled","id":"c1",
  "offset":0,"total_bytes":43352064,"plane_bytes":688128,
  "pixel_type":"uint16","bytes_per_sample":2,"signed":false,"little_endian":true,
- "axis_order":["t","z","c","y","x"],
+ "axis_order":["t","c","z","y","x"],
  "shape":{"x":672,"y":512,"c":1,"z":21,"t":1}}
 ```
 
@@ -164,6 +164,9 @@ Then any read operation may carry `handle` **instead of** `path`:
 ```json
 {"type":"inspect","id":"i1","handle":"e2b1…","detail":"full"}
 → {"type":"inspected","id":"i1","result":{ …full metadata… }}
+
+{"type":"get_ome_metadata","id":"x1","handle":"e2b1…"}
+→ {"type":"ome_metadata","id":"x1","format":"ome_xml","content":"<OME …>"}
 
 {"type":"get_plane","id":"p1","handle":"e2b1…","channel":"0","z":"0","t":"0"}
 → {"type":"plane","id":"p1","png_base64":"iVBOR…"}
@@ -209,16 +212,19 @@ Notes:
 
 ## 7. Interpreting the region
 
-Pixels are written **C-order, X fastest, T slowest**; `axis_order` is
-always `["t","z","c","y","x"]`.  The sample at `(t,z,c,y,x)` — indices
-relative to the **deposited selection**, not the source file — is at byte
+Pixels are written **C-order, X fastest, T slowest**, in the **NGFF /
+OME-Zarr canonical order** `axis_order = ["t","c","z","y","x"]` (the order
+napari/zarr/dask expect, so the region maps in without a transpose).  The
+sample at `(t,c,z,y,x)` — indices relative to the **deposited selection**,
+not the source file — is at byte
 
 ```
-offset + ((((t*Z + z)*C + c)*Y + y)*X + x) * bytes_per_sample
+offset + ((((t*C + c)*Z + z)*Y + y)*X + x) * bytes_per_sample
 ```
 
 where `X,Y,C,Z,T` are `shape.x/y/c/z/t`.  Each contiguous `plane_bytes`
-block (`X*Y*bytes_per_sample`) is one row-major `(t,z,c)` plane.  Multi-byte
+block (`X*Y*bytes_per_sample`) is one row-major `(t,c,z)` plane, and each
+channel's full Z-stack is a contiguous (channel-major) block.  Multi-byte
 samples use the byte order given by `little_endian`.
 
 NumPy, mapping the region read-only:
@@ -235,9 +241,9 @@ dtype = np.dtype(base if len(base) == 2 and base[1] == "1" else endian + base)
 
 s = d["shape"]
 arr = np.memmap(region_path, dtype=dtype, mode="r",
-                offset=d["offset"], shape=(s["t"], s["z"], s["c"], s["y"], s["x"]))
+                offset=d["offset"], shape=(s["t"], s["c"], s["z"], s["y"], s["x"]))
 # e.g. the first channel of the first volume:
-volume = arr[0, :, 0, :, :]          # (z, y, x)
+volume = arr[0, 0, :, :, :]          # (z, y, x)
 ```
 
 A "volume" is just a deposit with a full Z-range and a single

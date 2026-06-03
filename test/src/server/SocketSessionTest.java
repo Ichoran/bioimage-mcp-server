@@ -114,6 +114,12 @@ class SocketSessionTest {
             assertEquals("plane", plane.get("type"));
             assertNotNull(plane.get("png_base64"));
 
+            send(out, msg("type", "get_ome_metadata", "id", "m1", "handle", handle));
+            var meta = readLine(in);
+            assertEquals("ome_metadata", meta.get("type"));
+            assertEquals("ome_xml", meta.get("format"));
+            assertTrue(((String) meta.get("content")).contains("<OME"));
+
             send(out, msg("type", "close", "id", "c1", "handle", handle));
             var closed = readLine(in);
             assertEquals("closed", closed.get("type"));

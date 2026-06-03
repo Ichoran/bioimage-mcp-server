@@ -134,6 +134,7 @@ Deny rules always win.  See DESIGN.md §5 for details.
 | Tool | Returns | Purpose |
 |------|---------|---------|
 | `inspect_image` | JSON | Dimensions, pixel type, physical sizes, channels, instrument info |
+| `get_ome_metadata` | JSON | Full OME-XML metadata document (`{format, content}`), the portable form |
 | `get_thumbnail` | PNG | RGB composite preview with Z-projection and channel compositing |
 | `get_plane` | PNG | Single-channel grayscale plane at full resolution |
 | `get_intensity_stats` | JSON | Min/max/mean/stddev/median, histogram, saturation warnings |

@@ -486,6 +486,65 @@ public final class BioImageService {
         });
     }
 
+    /** Default wall-clock budget for retrieving the metadata document. */
+    private static final Duration DEFAULT_METADATA_TIMEOUT = Duration.ofSeconds(30);
+
+    /**
+     * Return the file's extended metadata as a format-tagged
+     * {@link OmeMetadata} document ({@code ome_xml}, or {@code ome_ngff} if a
+     * reader supplies one).  Accepts {@code handle} or {@code path}.  An
+     * optional {@code max_response_bytes} caps the document size: a document
+     * larger than the cap is an {@code INVALID_ARGUMENT} failure reporting the
+     * actual size (the document is never truncated — a partial XML/JSON would
+     * be corrupt and give false confidence).
+     */
+    public ToolResult<OmeMetadata> getOmeMetadata(Map<String, Object> args) {
+        return withSession(args, (factory, a) -> {
+            final Path canonical;
+            final Duration timeout;
+            final Long maxBytes;
+            try {
+                String rawPath = requireString(a, "path");
+                Duration t = optDuration(a, "timeout_seconds");
+                timeout = t != null ? t : DEFAULT_METADATA_TIMEOUT;
+                maxBytes = optLong(a, "max_response_bytes");
+                var access = pathValidator().check(rawPath);
+                if (access instanceof AccessResult.Denied d) {
+                    return ToolResult.accessDenied(d.reason());
+                }
+                canonical = ((AccessResult.Allowed) access).canonicalPath();
+            } catch (IllegalArgumentException e) {
+                return ToolResult.invalidArgument(e.getMessage());
+            }
+
+            var task = new CancellableTask(timeout);
+            return ToolResult.unwrap(task.run(() -> {
+                try (var reader = factory.get()) {
+                    reader.open(canonical);
+                    OmeMetadata block = reader.getMetadataBlock();
+                    if (block == null || block.content() == null) {
+                        throw new IOException(
+                                "no OME metadata is available for this file");
+                    }
+                    if (maxBytes != null) {
+                        long size = block.content()
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                        if (size > maxBytes) {
+                            // Never truncate a structured document.  Report the
+                            // size so the caller can raise the cap (or fetch it
+                            // over a transport without one).
+                            throw new IllegalArgumentException(block.format()
+                                    + " metadata is " + size + " bytes, exceeding "
+                                    + "max_response_bytes " + maxBytes
+                                    + "; raise the cap to retrieve it");
+                        }
+                    }
+                    return block;
+                }
+            }));
+        });
+    }
+
     public ToolResult<ExportToTiffTool.ExportResult> exportToTiff(
             Map<String, Object> args) {
         try {
@@ -712,9 +771,12 @@ public final class BioImageService {
         var canonicalTarget = ((AccessResult.Allowed) tgtAccess).canonicalPath();
 
         try (var sink = openSink(kind, canonicalTarget, total)) {
+            // C-order, axis order [t,c,z,y,x] (NGFF / OME-Zarr canonical):
+            // T slowest, then C, then Z, with each (y,x) plane contiguous.
+            // Iterate in memory order so writes are sequential.
             for (int ti = 0; ti < ts.length; ti++) {
-                for (int zi = 0; zi < zs.length; zi++) {
-                    for (int ci = 0; ci < cs.length; ci++) {
+                for (int ci = 0; ci < cs.length; ci++) {
+                    for (int zi = 0; zi < zs.length; zi++) {
                         if (Thread.interrupted()) {
                             throw new InterruptedException("deposit cancelled");
                         }
@@ -728,8 +790,8 @@ public final class BioImageService {
                                     + cs[ci] + ",z=" + zs[zi] + ",t=" + ts[ti]
                                     + "), expected " + planeBytes);
                         }
-                        long offset = (((long) ti * zs.length + zi)
-                                * cs.length + ci) * planeBytes;
+                        long offset = (((long) ti * cs.length + ci)
+                                * zs.length + zi) * planeBytes;
                         sink.writeAt(offset, plane);
                     }
                 }

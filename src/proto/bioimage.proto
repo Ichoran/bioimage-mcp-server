@@ -40,6 +40,7 @@ message ClientMsg {
     ThumbnailRequest thumbnail = 7;
     DepositRequest deposit = 8;
     ShutdownRequest shutdown = 9;
+    OmeMetadataRequest ome_metadata = 10;
   }
 }
 
@@ -111,6 +112,12 @@ message DepositTarget {
 
 message ShutdownRequest {}
 
+message OmeMetadataRequest {
+  string path = 1;
+  string handle = 2;
+  optional int32 max_response_bytes = 3;  // cap; omit for no limit
+}
+
 // ---- server → client ----
 
 message ServerMsg {
@@ -124,6 +131,7 @@ message ServerMsg {
     Closed closed = 7;
     ShutdownOk shutdown_ok = 8;
     Error error = 9;
+    OmeMetadataResult ome_metadata = 10;
   }
 }
 
@@ -174,4 +182,9 @@ message Error {
   // access_denied | invalid_argument | timeout | io_error | shutdown_refused
   string error_kind = 1;
   string message = 2;
+}
+
+message OmeMetadataResult {
+  string format = 1;   // "ome_xml" | "ome_ngff"
+  string content = 2;  // the XML or JSON document
 }
