@@ -913,3 +913,73 @@ is version-pinned in lockstep with the grpc-java/protobuf-java runtime (grpc
 1.81.0 / protobuf 3.25.8).  Converting from the former `build.mill.yaml` to
 Scala was necessary because the YAML build format cannot express a custom
 code-generation task.
+
+
+## 12. Protocol Governance
+
+We expose four transports over one protocol-neutral core, which raises the
+question every multi-transport, multi-client system faces: **how do N clients
+and M servers stay interoperable on one protocol without drift?**  Our answer
+rests on a deliberate split of authority.
+
+### 12.1 Sovereign vs. conformance surfaces
+
+- **Socket and HTTP are sovereign surfaces.**  We define them, we own their
+  wire formats, and we change them on our terms.  They carry the full feature
+  set at full fidelity.
+- **gRPC is a conformance surface.**  gRPC's value is interoperability — a
+  client that consumes many gRPC servers wants them to speak one schema.  So if
+  a sufficiently important client (or an emerging community standard) defines an
+  imaging-server contract, the right move is for us to **conform to it** rather
+  than impose our own.  We can afford this precisely because socket and HTTP
+  remain under our undisputed authority: being a polite guest on gRPC costs us
+  no control over our native API.
+
+This is the same pattern as CSI (Kubernetes defines the gRPC contract; storage
+vendors conform), Envoy xDS, and LSP/DAP: the important *consumer* owns the
+contract and ships a conformance test; *implementers* conform.
+
+### 12.2 Why conforming is cheap here
+
+Because {@code BioImageService} is protocol-neutral, conforming to someone
+else's gRPC contract is **another thin adapter** against the same core —
+exactly how {@code BioImageGrpcService} was written against our own
+{@code bioimage.proto}.  The image logic never moves.  Ownership of the schema
+can therefore stay undecided until a real consumer appears: today we own
+{@code src/proto/bioimage.proto} (server-authoritative); switching to
+consumer-authoritative later is an adapter swap, not a rewrite.
+
+### 12.3 Keeping one protocol stable across N×M
+
+The `.proto` *is* the contract, and three disciplines keep it interoperable:
+
+1. **One source of truth, not copies.**  Clients and servers import the same
+   schema (published stubs, a shared repo, or a registry) rather than vendoring
+   divergent copies.
+2. **Wire-compatibility rules.**  Protobuf's guarantees — never reuse field
+   numbers, add only `optional` fields, never change a field's type, ignore
+   unknown fields — let an old client talk to a new server and vice-versa.
+   That is what makes loose N×M coupling survive change.
+3. **Versioned packages.**  The package is `…bioimage.v1`; a genuine break ships
+   `…v2` as a *parallel* service run alongside `v1` during migration — never a
+   flag day.
+
+**Tooling.**  We lint the schema with the **buf CLI**, fetched from Maven
+Central (`build.buf:buf`, same OS-classified `exe` scheme as protoc) and run as
+`mill bufLint` — a standalone gate, not part of compile, and **CLI-only with no
+Buf Schema Registry dependency**.  `buf.yaml` excepts the few STANDARD rules
+that conflict with deliberate design choices (the single bidi `Session` stream
+with `ClientMsg`/`ServerMsg` envelopes, and the flat `src/proto` layout).
+Breaking-change detection (`buf breaking`) is deferred until `v1` is frozen —
+while we are still making intentional breaks pre-release it would only be noise.
+
+### 12.4 Conformance is semantic, not just syntactic
+
+The schema does not capture everything two implementations must agree on.  The
+deposit **axis order is TCZYX** (§9.3) — the descriptor carries `axis_order` as
+*data*, but "you MUST emit `[t,c,z,y,x]`" is a semantic rule.  Likewise the
+error-kind vocabulary, the "missing slice is an error" rule, the capacity
+refusal that writes nothing, and the `max_response_bytes` behavior.  These live
+in the conformance spec — `service-endpoints.md` — which any conforming server
+(ours or a third party's) must satisfy beyond merely compiling against the
+`.proto`.

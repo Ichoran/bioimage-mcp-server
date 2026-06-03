@@ -40,6 +40,9 @@ object `package` extends JavaModule with PublishModule {
   // match the grpc-java runtime — keep these three in lockstep.
   val grpcVersion = "1.81.0"
   val protobufVersion = "3.25.8"
+  // buf CLI — published to Maven Central as build.buf:buf with the SAME
+  // OS/arch classifier scheme as protoc, so protocClassifier() works for it too.
+  val bufVersion = "1.63.0"
 
   def mvnDeps = Seq(
     mvn"ome:formats-gpl:8.4.0",
@@ -147,6 +150,33 @@ object `package` extends JavaModule with PublishModule {
   /** Feed the generated .java sources into compilation. */
   override def generatedSources: T[Seq[PathRef]] =
     Task { super.generatedSources() ++ Seq(protocGenerate()) }
+
+  // ================================================================
+  // Protobuf schema linting (buf)
+  //
+  // A standalone validation gate — NOT part of compile/codegen.  Run
+  // `mill bufLint` (e.g. in CI) to lint src/proto against buf.yaml.  Uses the
+  // CLI only (no Buf Schema Registry); the binary is fetched from Maven like
+  // protoc.  See DESIGN.md §12.
+  // ================================================================
+
+  def bufExe: Task[PathRef] = Task {
+    stageExe(
+      defaultResolver(),
+      s"build.buf:buf:$bufVersion;classifier=${protocClassifier()};type=exe",
+      Task.dest / "buf")
+  }
+
+  /**
+   * Lint the proto module (`mill bufLint`); fails on any violation (buf exits
+   * non-zero, which makes os.proc throw).  A command, so it is CLI-invokable
+   * and always runs rather than caching a past success.
+   */
+  def bufLint() = Task.Command {
+    os.proc(bufExe().path, "lint")
+      .call(cwd = moduleDir, stdout = os.Inherit, stderr = os.Inherit)
+    ()
+  }
 
   // Replaces test/package.mill.yaml (extends [build.JavaTests, TestModule.Junit5]).
   object test extends JavaTests with TestModule.Junit5 {
