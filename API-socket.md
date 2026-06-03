@@ -143,11 +143,19 @@ You can skip the dry run if you already know the exact size (e.g. from an
  "offset":0,"total_bytes":43352064,"plane_bytes":688128,
  "pixel_type":"uint16","bytes_per_sample":2,"signed":false,"little_endian":true,
  "axis_order":["t","c","z","y","x"],
- "shape":{"x":672,"y":512,"c":1,"z":21,"t":1}}
+ "shape":{"x":672,"y":512,"c":1,"z":21,"t":1},
+ "selection":{"t":[[0,1]],"c":[[0,1]],"z":[[0,21]],"y":[[0,512]],"x":[[0,672]]}}
 ```
 
 `filled` **is** the ready signal: no `filled` ⇒ the region is incomplete
 and must be discarded.
+
+`shape` is the per-axis count; **`selection`** is what makes the bytes
+interpretable — the actual **source indices** delivered on every axis, in
+buffer order, as run-length `[start, stop)` ranges.  When a channel/Z/T
+selection is non-contiguous or reordered the counts alone are ambiguous, so use
+`selection`: e.g. `"channels":"0,2,5"` returns `"c":[[0,1],[2,3],[5,6]]`,
+telling you buffer channels 0,1,2 are source channels 0,2,5.
 
 ## 5b. Sessions and handle-based reads
 
@@ -249,6 +257,19 @@ volume = arr[0, 0, :, :, :]          # (z, y, x)
 A "volume" is just a deposit with a full Z-range and a single
 channel/timepoint; there is no native multi-plane read underneath, so the
 server loops planes and lays them out contiguously for you.
+
+**Mapping buffer positions back to source indices.** The array is indexed by
+*buffer* position; to recover the *source* index on an axis, expand that axis's
+`selection` ranges in order. For `"c":[[0,1],[2,3],[5,6]]` the source channels
+are `[0,2,5]`, so `arr[:, k]` is source channel `[0,2,5][k]`:
+
+```python
+def expand(ranges):                     # selection ranges → source index list
+    return [i for r in ranges for i in range(r[0], r[1])]
+
+src_c = expand(d["selection"]["c"])     # e.g. [0, 2, 5]
+# arr[0, k] is the plane for source channel src_c[k]
+```
 
 ## 8. Robustness
 

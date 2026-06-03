@@ -223,6 +223,38 @@ Full spec in DESIGN.md §10 (sessions) and §11 (gRPC).
   service-endpoints.md, API-socket.md, API-grpc.md, README, this file.
 
 
+## Phase 14: Protocol governance, buf lint, deposit completeness — done
+
+- **`mill bufLint`.** Standalone schema-lint command (not part of compile).
+  The buf CLI is fetched from Maven Central (`build.buf:buf`) using the same
+  OS-classified `exe` scheme as protoc, so `stageExe`/`protocClassifier` work
+  verbatim — CLI-only, no Buf Schema Registry.  `buf.yaml` runs STANDARD,
+  excepting the rules that conflict with deliberate choices (single bidi
+  `Session` stream with `ClientMsg`/`ServerMsg` envelopes; flat `src/proto`).
+  `buf breaking` deferred until v1 is frozen.
+- **DESIGN §12 Protocol Governance.** Doctrine: socket/HTTP are sovereign
+  surfaces; gRPC is a conformance surface (conform to an important client's
+  contract rather than impose ours — cheap because the core is protocol-neutral,
+  so it's another thin adapter).  N×M stability via one source of truth +
+  protobuf wire-compat + versioned packages; semantic conformance (axis order,
+  error kinds) lives in `service-endpoints.md`, not the `.proto`.
+- **gRPC deposit concessions (§12.5).** `DepositRequest` gains `y`, `x`
+  (accepted but IGNORED — full plane served) and `level` (only 0 served; any
+  other REFUSED, never silently downgraded).  gRPC-only.  Safe because of the
+  next item.
+- **Per-axis selection in the descriptor.**  `DepositDescriptor` now reports
+  `selection` — the resolved source indices delivered on **every** axis, in
+  buffer order, as run-length `[start,stop)` ranges (`AxisSelection`/
+  `IndexRange`).  Counts alone can't interpret an arbitrary/non-contiguous 5D
+  subset (`channels:"0,2,5"` → `c:[[0,1],[2,3],[5,6]]`); the selection maps
+  buffer index → source index on each axis.  X/Y are full here but reported
+  anyway so the format is general.  Surfaced on socket (`filled.selection`) and
+  gRPC (`Filled.selection` via new `AxisSelection`/`AxisRange` messages).
+- **Validated:** 394 unit tests green (+`DepositTest` selection RLE,
+  gRPC y/x-ignored + level-refused + selection assertions); buf lint green;
+  MCP smoke 10/10.  Docs: DESIGN §9.4/§12, API-socket.md §5/§7, API-grpc.md.
+
+
 ## Already done
 
 - Project skeleton, Mill build, JUnit 5 tests

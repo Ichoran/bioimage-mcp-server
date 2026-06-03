@@ -500,19 +500,25 @@ public final class BioImageGrpcService {
     }
 
     private static ServerMsg filled(String id, DepositDescriptor d) {
-        return ServerMsg.newBuilder().setId(id)
-                .setFilled(Filled.newBuilder()
-                        .setOffset(d.offset())
-                        .setTotalBytes(d.totalBytes())
-                        .setPlaneBytes(d.planeBytes())
-                        .setPixelType(d.pixelType())
-                        .setBytesPerSample(d.bytesPerSample())
-                        .setSigned(d.signed())
-                        .setLittleEndian(d.littleEndian())
-                        .addAllAxisOrder(DepositDescriptor.AXIS_ORDER)
-                        .setSizeX(d.sizeX()).setSizeY(d.sizeY())
-                        .setSizeC(d.sizeC()).setSizeZ(d.sizeZ()).setSizeT(d.sizeT()))
-                .build();
+        var fb = Filled.newBuilder()
+                .setOffset(d.offset())
+                .setTotalBytes(d.totalBytes())
+                .setPlaneBytes(d.planeBytes())
+                .setPixelType(d.pixelType())
+                .setBytesPerSample(d.bytesPerSample())
+                .setSigned(d.signed())
+                .setLittleEndian(d.littleEndian())
+                .addAllAxisOrder(DepositDescriptor.AXIS_ORDER)
+                .setSizeX(d.sizeX()).setSizeY(d.sizeY())
+                .setSizeC(d.sizeC()).setSizeZ(d.sizeZ()).setSizeT(d.sizeT());
+        for (DepositDescriptor.AxisSelection as : d.selection()) {
+            var asb = AxisSelection.newBuilder().setAxis(as.axis());
+            for (DepositDescriptor.IndexRange r : as.ranges()) {
+                asb.addRanges(AxisRange.newBuilder().setStart(r.start()).setStop(r.stop()));
+            }
+            fb.addSelection(asb);
+        }
+        return ServerMsg.newBuilder().setId(id).setFilled(fb).build();
     }
 
     private static ServerMsg errorOf(String id, ToolResult.Failure<?> f) {

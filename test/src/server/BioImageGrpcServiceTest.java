@@ -114,6 +114,12 @@ class BioImageGrpcServiceTest {
             ServerMsg filled = collector.take();
             assertEquals(ServerMsg.MsgCase.FILLED, filled.getMsgCase());
             assertEquals(total, filled.getFilled().getTotalBytes());
+            // Descriptor reports the resolved indices on every axis.
+            assertEquals(5, filled.getFilled().getSelectionCount());
+            var xSel = filled.getFilled().getSelectionList().stream()
+                    .filter(a -> a.getAxis().equals("x")).findFirst().orElseThrow();
+            assertEquals(0, xSel.getRanges(0).getStart());
+            assertEquals(X, xSel.getRanges(0).getStop());
             byte[] bytes = Files.readAllBytes(tgt);
             assertEquals(total, bytes.length);
             boolean nonZero = false;

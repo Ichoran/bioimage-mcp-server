@@ -740,7 +740,8 @@ public final class BioImageService {
                 bps, si.pixelType().isSigned(),
                 reader.isLittleEndian(series),
                 si.sizeX(), si.sizeY(),
-                cs.length, zs.length, ts.length);
+                cs.length, zs.length, ts.length,
+                DepositDescriptor.selectionsFor(ts, cs, zs, si.sizeY(), si.sizeX()));
 
         // Dry run: report the size/layout so the client can allocate.
         if (dryRun) {

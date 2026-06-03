@@ -95,7 +95,12 @@ server → ServerMsg{closed: {handle}}
 The `deposit` flow (dry-run sizing, region allocation, layout/interpretation
 of the filled buffer) is identical to the socket transport — see
 **[API-socket.md](API-socket.md) §5 and §7**, including the NumPy `memmap`
-example.  The `Filled` message fields mirror the socket `filled` descriptor.
+example.  The `Filled` message fields mirror the socket `filled` descriptor,
+including the repeated **`selection`** (one `AxisSelection{axis, ranges}` per
+axis): the resolved source indices delivered on every axis, as run-length
+`AxisRange{start, stop}` (half-open) entries.  This is what makes an
+arbitrary-subset deposit interpretable — buffer channel *k* is source channel
+`expand(selection.c)[k]`, etc.
 
 Stateless use (no session) is also supported: send any read op with `path`
 set instead of `handle`.

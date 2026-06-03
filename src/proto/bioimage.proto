@@ -169,6 +169,18 @@ message PngResult {
   string projection_used = 2;      // thumbnail only; empty for plane
 }
 
+// A half-open run [start, stop) of source indices.
+message AxisRange {
+  int32 start = 1;
+  int32 stop = 2;
+}
+
+// Source indices delivered on one axis, in buffer order (run-length encoded).
+message AxisSelection {
+  string axis = 1;             // "t" | "c" | "z" | "y" | "x"
+  repeated AxisRange ranges = 2;
+}
+
 // Mirrors DepositDescriptor (see DESIGN.md §9).
 message Filled {
   int64 offset = 1;
@@ -184,6 +196,9 @@ message Filled {
   int32 size_c = 11;
   int32 size_z = 12;
   int32 size_t = 13;
+  // Per-axis resolved source indices (one entry per axis_order axis), so an
+  // arbitrary-subset deposit is interpretable from the descriptor alone.
+  repeated AxisSelection selection = 14;
 }
 
 message Closed {

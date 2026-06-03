@@ -284,6 +284,14 @@ final class JsonUtil {
         shape.put("z", d.sizeZ());
         shape.put("t", d.sizeT());
         map.put("shape", shape);
+        // Per-axis resolved source indices (run-length [start,stop) ranges),
+        // so the byte stream is interpretable for an arbitrary 5D subset.
+        var selection = new LinkedHashMap<String, Object>();
+        for (var as : d.selection()) {
+            selection.put(as.axis(), as.ranges().stream()
+                    .map(r -> List.of(r.start(), r.stop())).toList());
+        }
+        map.put("selection", selection);
         return map;
     }
 

@@ -725,7 +725,7 @@ planes and composes the contiguous buffer itself.
 On connect the server sends a hello:
 
 ```json
-{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.1.1"}
+{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.2.0"}
 ```
 
 **Deposit** (one in flight per connection, sequential; `id` is client-chosen
@@ -751,8 +751,18 @@ Set `"dry_run":true` (and omit `target`) to get the descriptor — with
  "offset":0,"total_bytes":43352064,"plane_bytes":688128,
  "pixel_type":"uint16","bytes_per_sample":2,"signed":false,"little_endian":true,
  "axis_order":["t","c","z","y","x"],
- "shape":{"x":672,"y":512,"c":1,"z":21,"t":1}}
+ "shape":{"x":672,"y":512,"c":1,"z":21,"t":1},
+ "selection":{"t":[[0,1]],"c":[[0,1]],"z":[[0,21]],"y":[[0,512]],"x":[[0,672]]}}
 ```
+
+`shape` gives the per-axis *counts*; `selection` gives the actual **source
+indices** delivered on every axis, in buffer order, as run-length
+`[start, stop)` ranges.  The counts alone are not enough to interpret the
+bytes when a channel/Z/T selection is a non-contiguous or reordered list — e.g.
+`channels:"0,2,5"` yields `"c":[[0,1],[2,3],[5,6]]`, so buffer channel 0/1/2 map
+to source channels 0/2/5.  X and Y are always the full plane here, but are
+reported anyway so the format is general (a server that crops X/Y fills in real
+sub-selections through the same field).
 
 **Error** (`error_kind` is `access_denied` | `invalid_argument` | `timeout`
 | `io_error` for operation failures):

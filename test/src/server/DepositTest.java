@@ -142,6 +142,44 @@ class DepositTest {
     }
 
     @Test
+    void descriptorReportsResolvedPerAxisSelection(@TempDir Path dir) throws Exception {
+        int sc = 3;
+        var service = serviceFor(dir, sc);
+        var src = touch(dir, "src.fake");
+        var args = argsFor(src);          // z=":", t=":"
+        args.put("channels", "0,2");      // non-contiguous channel list
+        args.put("dry_run", true);
+
+        var d = assertSuccess(service.deposit(args));
+        var sel = d.selection();
+        assertEquals(java.util.List.of("t", "c", "z", "y", "x"),
+                sel.stream().map(DepositDescriptor.AxisSelection::axis).toList(),
+                "selection covers every axis in buffer order");
+
+        var c = axis(sel, "c");
+        assertEquals(2, c.size(), "0,2 is non-contiguous → two ranges");
+        assertRange(c.get(0), 0, 1);
+        assertRange(c.get(1), 2, 3);
+
+        assertEquals(1, axis(sel, "z").size());             // full Z is contiguous
+        assertRange(axis(sel, "z").get(0), 0, Z);
+        assertRange(axis(sel, "t").get(0), 0, T);
+        assertRange(axis(sel, "y").get(0), 0, Y);           // full plane
+        assertRange(axis(sel, "x").get(0), 0, X);
+    }
+
+    private static java.util.List<DepositDescriptor.IndexRange> axis(
+            java.util.List<DepositDescriptor.AxisSelection> sel, String name) {
+        return sel.stream().filter(a -> a.axis().equals(name))
+                .findFirst().orElseThrow().ranges();
+    }
+
+    private static void assertRange(DepositDescriptor.IndexRange r, int start, int stop) {
+        assertEquals(start, r.start());
+        assertEquals(stop, r.stop());
+    }
+
+    @Test
     void dryRunReturnsDescriptorWithoutTouchingTarget(@TempDir Path dir)
             throws Exception {
         var service = serviceFor(dir, C);
