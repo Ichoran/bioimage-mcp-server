@@ -30,7 +30,9 @@ a feature tweaked, please submit an issue!
 Installation should be [one line on the command-line, listed on the download
 page](https://www.jbang.dev/download/)!
 
-### To use with Claude Code
+### Example uses
+
+#### To use with Claude Code
 
 ```sh
 claude mcp add bioimage-mcp \
@@ -56,8 +58,24 @@ claude mcp remove bioimage-mcp
 
 and future invocations will no longer have access.
 
+#### To use as a gRPC server (launching from GitHub)
 
-### To use with Claude Desktop
+Run
+
+```sh
+jbang https://github.com/ichoran/bioimage-mcp-server/blob/main/runner/bioimage-grpc.java \
+  --allow /network/core/confocal/JaneDoe
+```
+
+in a terminal window; hit Ctrl-C to terminate.
+
+Connect via 127.0.0.1:8723; see src/proto/bioimage.proto for schema.
+
+(Note that pixels are transferred across a filesystem endpoint, which may
+be a memory-mapped virtual file system if your system supports that; clients
+are responsible for requesting the target.)
+
+#### To use with Claude Desktop
 
 Add to your Claude Desktop configuration (`claude_desktop_config.json`),
 with the same caveats about paths:
@@ -90,7 +108,7 @@ its own JBang runner and the same `--allow`/`--deny` rules:
   pixel volumes. See [API-socket.md](API-socket.md).
 - **gRPC (local)** — `runner/bioimage_grpc.java`; a loopback bidirectional
   stream, also session-capable, reusing the shared-memory deposit for bulk
-  data. See [API-grpc.md](API-grpc.md).
+  data. See [API-grpc.md](API-grpc.md).  The default port is 8723.
 
 The socket and gRPC transports support **sessions**: open an image once,
 get a handle, and reuse the kept-open reader for many reads; the reader is
