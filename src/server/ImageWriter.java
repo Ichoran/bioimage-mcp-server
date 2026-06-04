@@ -62,6 +62,36 @@ public interface ImageWriter extends AutoCloseable {
     void writePlane(int planeIndex, byte[] data) throws IOException;
 
     /**
+     * Write a single 2D plane, supplying its position on every axis.
+     *
+     * <p>This is the coordinate-addressed counterpart to
+     * {@link #writePlane(int, byte[])}.  The {@code c}/{@code z}/{@code t}
+     * indices are <b>output-relative</b> — zero-based within the subset
+     * actually being written, not the source file's indices.  They let a
+     * writer place a plane by coordinate rather than by relying on the
+     * OME-XML dimension order to interpret a flat plane index.
+     *
+     * <p>The default implementation ignores the coordinates and delegates
+     * to {@link #writePlane(int, byte[])}, which is correct for writers
+     * (such as OME-TIFF) that address planes by index through the OME-XML
+     * dimension order.  Writers that address planes by coordinate (such as
+     * OME-Zarr) override this method; for those writers the plain
+     * {@link #writePlane(int, byte[])} may be unsupported.
+     *
+     * @param planeIndex zero-based plane index within the current series,
+     *                   following the OME-XML dimension order
+     * @param c          output-relative channel index
+     * @param z          output-relative Z index
+     * @param t          output-relative timepoint index
+     * @param data       raw pixel bytes (see {@link #writePlane(int, byte[])})
+     * @throws IOException if the data cannot be written
+     */
+    default void writePlane(int planeIndex, int c, int z, int t, byte[] data)
+            throws IOException {
+        writePlane(planeIndex, data);
+    }
+
+    /**
      * Returns the total number of bytes written to the output file
      * so far.  This is an approximation — it may not account for
      * headers or compression overhead precisely.

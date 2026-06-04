@@ -232,6 +232,32 @@ final class JsonUtil {
     }
 
     // ================================================================
+    // NgffResult
+    // ================================================================
+
+    static Map<String, Object> toMap(ExportToNgffTool.NgffResult r) {
+        var map = new LinkedHashMap<String, Object>();
+        map.put("output_path", r.outputPath());
+        map.put("bytes_written", r.bytesWritten());
+        map.put("series_exported", r.seriesExported());
+        map.put("channels_per_series", r.channelsPerSeries());
+        map.put("z_slices_per_series", r.zSlicesPerSeries());
+        map.put("timepoints_per_series", r.timepointsPerSeries());
+        map.put("total_planes_written", r.totalPlanesWritten());
+        map.put("codec", r.codec().name().toLowerCase());
+        map.put("compression_level",
+                r.compressionLevel() != null ? r.compressionLevel() : "default");
+        map.put("format", "ome_ngff");
+        map.put("ngff_version", "0.5");
+        map.put("source_format", r.sourceFormat());
+        map.put("ome_xml_present", r.omeXmlPresent());
+        if (!r.warnings().isEmpty()) {
+            map.put("warnings", r.warnings());
+        }
+        return map;
+    }
+
+    // ================================================================
     // ThumbnailResult (text metadata only; image is sent separately)
     // ================================================================
 

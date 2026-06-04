@@ -29,9 +29,14 @@ public final class FakeImageWriter implements ImageWriter {
      *
      * @param series     the series that was active when the plane was written
      * @param planeIndex the plane index within the series
+     * @param c          output-relative channel index, or -1 if the plane was
+     *                   written through the index-only {@link #writePlane(int, byte[])}
+     * @param z          output-relative Z index, or -1 (see {@code c})
+     * @param t          output-relative timepoint index, or -1 (see {@code c})
      * @param data       the raw pixel bytes (defensive copy)
      */
-    public record WrittenPlane(int series, int planeIndex, byte[] data) {
+    public record WrittenPlane(
+            int series, int planeIndex, int c, int z, int t, byte[] data) {
         public WrittenPlane {
             data = data.clone();
         }
@@ -58,7 +63,17 @@ public final class FakeImageWriter implements ImageWriter {
     @Override
     public void writePlane(int planeIndex, byte[] data) throws IOException {
         checkOpen();
-        planes.add(new WrittenPlane(currentSeries, planeIndex, data));
+        planes.add(new WrittenPlane(
+                currentSeries, planeIndex, -1, -1, -1, data));
+        bytesWritten += data.length;
+    }
+
+    @Override
+    public void writePlane(int planeIndex, int c, int z, int t, byte[] data)
+            throws IOException {
+        checkOpen();
+        planes.add(new WrittenPlane(
+                currentSeries, planeIndex, c, z, t, data));
         bytesWritten += data.length;
     }
 

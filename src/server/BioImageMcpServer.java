@@ -63,7 +63,9 @@ public class BioImageMcpServer {
             4. get_intensity_stats for quantitative assessment — min/max, \
             mean, histogram, saturation warnings.  Adaptive mode reads \
             as much data as time and memory allow.
-            5. export_to_tiff to convert to OME-TIFF for downstream tools.
+            5. export_to_tiff to convert to OME-TIFF for downstream tools, \
+            or export_to_ngff to convert to OME-Zarr (OME-NGFF 0.5) for \
+            large/cloud-native data (napari, zarr/dask, neuroglancer).
 
             Key points:
             - All paths must be absolute.
@@ -171,7 +173,8 @@ public class BioImageMcpServer {
                         getThumbnailSpec(),
                         getPlaneSpec(),
                         getIntensityStatsSpec(),
-                        exportToTiffSpec())
+                        exportToTiffSpec(),
+                        exportToNgffSpec())
                 .build();
 
         // The transport threads keep the JVM alive until the client
@@ -337,6 +340,29 @@ public class BioImageMcpServer {
                         .build())
                 .callHandler((exchange, request) ->
                         handleExportToTiff(request.arguments()))
+                .build();
+    }
+
+    private SyncToolSpecification exportToNgffSpec() {
+        return SyncToolSpecification.builder()
+                .tool(McpSchema.Tool.builder()
+                        .name("export_to_ngff")
+                        .description("Convert microscopy data to OME-Zarr "
+                                + "(OME-NGFF 0.5, Zarr v3), the cloud-native open "
+                                + "format for large bioimaging data, readable by "
+                                + "napari, zarr/dask, and neuroglancer. Streams to "
+                                + "a chunked, compressed .zarr directory (not a "
+                                + "single file), so it scales to very large "
+                                + "volumes. Can subset by series, channels, "
+                                + "Z-range, and time-range. The output directory "
+                                + "must not already exist. Does not modify the "
+                                + "original file.")
+                        .inputSchema(exportToNgffSchema())
+                        .annotations(new McpSchema.ToolAnnotations(
+                                null, false, false, false, false, false))
+                        .build())
+                .callHandler((exchange, request) ->
+                        handleExportToNgff(request.arguments()))
                 .build();
     }
 
@@ -561,6 +587,61 @@ public class BioImageMcpServer {
                 false, null, null);
     }
 
+    private static McpSchema.JsonSchema exportToNgffSchema() {
+        var props = new LinkedHashMap<String, Object>();
+        props.put("path", Map.of(
+                "type", "string",
+                "description", "Absolute path to the source image file"));
+        props.put("output_path", Map.of(
+                "type", "string",
+                "description", "Absolute path for the output .zarr directory "
+                        + "(must not already exist)"));
+        props.put("series", Map.of(
+                "type", "integer",
+                "description", "Series to export (default: all series)"));
+        props.put("channels", Map.of(
+                "type", "string",
+                "description", "Channel selection (required). " + SLICE_DESC));
+        props.put("z", Map.of(
+                "type", "string",
+                "description", "Z-slice selection (required); must be a single "
+                        + "contiguous range (e.g. ':' or '0:10'). " + SLICE_DESC));
+        props.put("t", Map.of(
+                "type", "string",
+                "description", "Timepoint selection (required); must be a single "
+                        + "contiguous range (e.g. ':' or '0:10'). " + SLICE_DESC));
+        props.put("codec", Map.of(
+                "type", "string",
+                "enum", List.of("none", "gzip", "zstd", "blosc"),
+                "description", "Chunk compression codec (default: zstd at "
+                        + "level 5, a good speed/size balance). 'none' is "
+                        + "fastest/largest; 'gzip' is pure-Java; 'blosc' is "
+                        + "lz4 + byte-shuffle (very fast, near-free); 'zstd' "
+                        + "compresses best at a given speed."));
+        props.put("compression_level", Map.of(
+                "type", "integer",
+                "description", "Compression effort, trading speed against size. "
+                        + "Default: zstd uses level 5; blosc uses clevel 5; "
+                        + "gzip uses its library default. Lower is "
+                        + "faster and larger; higher is slower and smaller. "
+                        + "For microscopy, speed is often the priority, so a low "
+                        + "level (or codec 'none') is a reasonable default. "
+                        + "Valid ranges: gzip 0-9, zstd -7 to 22 (negative "
+                        + "levels are the fastest), blosc 0-9. Not applicable "
+                        + "to codec 'none'."));
+        props.put("timeout_seconds", Map.of(
+                "type", "integer",
+                "description", "Wall-clock time limit in seconds (default: 1800)"));
+        props.put("max_bytes", Map.of(
+                "type", "integer",
+                "description", "Approximate cap on raw pixel bytes to read+write "
+                        + "(default: 100 GB). A guard, not a memory bound — the "
+                        + "export streams to disk; raise it for larger datasets."));
+        return new McpSchema.JsonSchema(
+                "object", props, List.of("path", "output_path", "channels", "z", "t"),
+                false, null, null);
+    }
+
     // ================================================================
     // Tool handlers — delegate to the service, map ToolResult → MCP
     // ================================================================
@@ -627,6 +708,15 @@ public class BioImageMcpServer {
             case ToolResult.Success<ExportToTiffTool.ExportResult> s ->
                 jsonResult(JsonUtil.toMap(s.value()));
             case ToolResult.Failure<ExportToTiffTool.ExportResult> f ->
+                errorResult(f);
+        };
+    }
+
+    private CallToolResult handleExportToNgff(Map<String, Object> args) {
+        return switch (service.exportToNgff(args)) {
+            case ToolResult.Success<ExportToNgffTool.NgffResult> s ->
+                jsonResult(JsonUtil.toMap(s.value()));
+            case ToolResult.Failure<ExportToNgffTool.NgffResult> f ->
                 errorResult(f);
         };
     }

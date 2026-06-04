@@ -15,9 +15,13 @@ object `package` extends JavaModule with PublishModule {
 
   def jvmVersion = "21"
 
-  // Extra repository appended to the defaults (Maven Central is implicit).
+  // Extra repositories appended to the defaults (Maven Central is implicit).
+  // - OME: Bio-Formats artifacts.
+  // - Unidata: netcdf-java `edu.ucar:cdm-core`, a transitive dep of zarr-java
+  //   that is NOT published to Maven Central.
   def repositories = Seq(
-    "https://artifacts.openmicroscopy.org/artifactory/maven/"
+    "https://artifacts.openmicroscopy.org/artifactory/maven/",
+    "https://artifacts.unidata.ucar.edu/repository/unidata-all/"
   )
 
   // Disable the shell/batch launcher that Mill prepends to assembly jars.
@@ -52,6 +56,11 @@ object `package` extends JavaModule with PublishModule {
     mvn"org.apache.commons:commons-text:1.13.0",
     mvn"commons-cli:commons-cli:1.11.0",
     mvn"org.slf4j:slf4j-simple:2.0.16",
+    // OME-NGFF (OME-Zarr v3) writer.  Pulls netcdf cdm-core (ucar.ma2.Array,
+    // from the Unidata repo above) and native blosc/zstd codecs.  We write
+    // local files only, so exclude the heavy AWS S3 store dependency.
+    mvn"dev.zarr:zarr-java:0.1.3"
+      .exclude("software.amazon.awssdk" -> "s3"),
     // gRPC-Java runtime + protobuf runtime (the generated *Grpc.java and
     // protobuf message classes need these at compile time).
     mvn"io.grpc:grpc-netty-shaded:$grpcVersion",

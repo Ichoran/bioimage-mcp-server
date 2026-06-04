@@ -255,6 +255,124 @@ Full spec in DESIGN.md §10 (sessions) and §11 (gRPC).
   MCP smoke 10/10.  Docs: DESIGN §9.4/§12, API-socket.md §5/§7, API-grpc.md.
 
 
+## Phase 15: OME-NGFF (OME-Zarr v3 / NGFF 0.5) export — MCP path DONE; docs + other transports remain
+
+**Status:** Steps 0–3 complete and validated end-to-end.  `export_to_ngff` is
+live on the MCP/stdio transport.  408 unit tests green (+`ZarrWriterTest` ×7,
+`ExportToNgffToolTest` ×7); MCP smoke 10/10 on the assembled jar; **live
+real-CZI export** (Zeiss CZI → 3C×21Z OME-Zarr, 25 MB zstd) read back valid
+with correct physical scales (Z 0.35 µm, XY 0.2048 µm).  Remaining: Step 4
+docs (DESIGN §13, README, API-*.md) and the HTTP/socket/gRPC transports
+(deliberately deferred — MCP-first was the chosen scope).
+
+**Compression tuning exposed.** `export_to_ngff` takes both `codec`
+(none/gzip/zstd/blosc) and `compression_level` (gzip 0–9, zstd −7…22 with
+negative = fastest, blosc 0–9; not applicable to `none`; omitted = the
+codec's default).  The level threads through as a `codec[:level]` spec to
+`ZarrWriter`, which applies it (zstd keeps its checksum).  Out-of-range /
+none+level are INVALID_ARGUMENT.  **Defaults:** when unspecified, codec is **zstd pinned at level 5**
+(explicit, reported — a good speed/size balance), and **blosc is wired as
+lz4 + byte-shuffle** (its fast identity; the earlier zstd-inner + noshuffle
+default was strictly worse than plain zstd — no shuffle benefit on numeric
+data).  gzip keeps its library default.  Verified on the
+real CZI: zstd:5 ≈ 180 MB/s/core compression (isolated against a 277 ms
+read+write baseline for a 43 MB timepoint); high zstd levels (19/22) cost ~7×
+the time for no size gain; blosc (lz4+shuffle) gives near-free compression
+(~245 ms ≈ the raw-write baseline, ratio ~1.56) — the speed pick, with zstd:5
+the ratio pick (1.72).  Speed is usually the right priority for microscopy.
+
+
+
+Add a second export target alongside OME-TIFF: **OME-Zarr** conforming to
+**OME-NGFF 0.5** (which *is* Zarr v3).  Zarr's value is big data, so the
+non-negotiable requirement is that export streams to disk with bounded
+memory — which our existing plane-by-plane `ImageWriter` loop already does.
+
+**Library decision (validated against Maven Central + bioformats2raw):**
+- **`dev.zarr:zarr-java:0.1.3`** — the JVM-native Zarr v2/v3 library
+  (zarr-developers).  On Maven Central (versions 0.1.0–0.1.3; the older
+  0.0.x are not API-compatible).  Same library line bioformats2raw 0.12+
+  uses, so it is the proven path for NGFF 0.5 output.  Region writes
+  (`array.write(offset, ucar.ma2.Array)`), filesystem/S3/zip/memory stores,
+  v3 sharding — exactly our streaming need.
+- We write `zarr-java` directly behind a new `ImageWriter` impl, **not**
+  shell out to bioformats2raw (a whole picocli app that would bypass our
+  access-control, budget, and `ExportResult` machinery).
+
+**Validated facts:** NGFF 0.5 = Zarr v3; a **single resolution level is
+valid** (no pyramid required → MVP can skip downsampling).  Layout: a Zarr
+group whose `zarr.json` carries `attributes.ome.multiscales` (axes t/c/z/y/x
+with units, one dataset `"0"`, `coordinateTransformations` scale from physical
+pixel sizes).  OME-XML is optional and, by the `bioformats2raw.layout`
+convention, lives at `OME/METADATA.ome.xml`.
+
+**Build risks to settle in Step 0 (the spike) — refine plan if any bite:**
+- `edu.ucar:cdm-core:5.9.1` (netcdf-java; provides `ucar.ma2.Array`) is
+  **NOT on Maven Central** → must add the **Unidata repo**
+  (`https://artifacts.unidata.ucar.edu/repository/unidata-all/`) to
+  `build.mill` `repositories` (same pattern as the OME repo already there).
+- **protobuf clash:** netcdf cdm-core pulls its own protobuf-java; we pin
+  3.25.8 for gRPC.  Confirm coursier resolves one compatible version and
+  that gRPC codegen + all tests still pass.  This is the make-or-break check.
+- **Footprint:** zarr-java drags in AWS `s3:2.34.6` (large), okhttp, netcdf,
+  and native `blosc-java`/`zstd-jni`.  We only write local files, so we
+  **exclude `software.amazon.awssdk:s3`** (S3 store unused).  RESOLVED: the
+  assembly grew from ~? to **77 MB** — acceptable for the JBang download.
+  Codec default is **zstd** (proven working incl. the native lib; far better
+  ratio than gzip, which is the point of Zarr for big data); gzip stays
+  available as the pure-Java fallback.
+- Jackson 2.20.0 (zarr-java) vs Bio-Formats' Jackson 2.x — expect coursier to
+  pick the higher 2.x; verify nothing breaks.
+
+### Steps
+
+- **Step 0 — Dependency spike (DE-RISK FIRST). — DONE.** Add `zarr-java:0.1.3` +
+  Unidata repo to `build.mill`; exclude awssdk s3.  Resolve; confirm gRPC
+  protobuf still 3.25.8 and `mill test` + codegen + MCP smoke stay green.
+  Throwaway smoke test: create a v3 **sharded** array on local FS, write a
+  region via `ucar.ma2.Array`, read it back, assert byte-exact.  Confirms the
+  0.1.3 write API and that a chosen codec works.  **If the protobuf clash or
+  footprint is unacceptable, stop and reconsider** (pin netcdf differently,
+  exclude more, or fall back to a bioformats2raw subprocess).
+- **Step 1 — `ImageWriter` refinement. — DONE.** The TIFF path uses an opaque
+  sequential `planeIndex`; Zarr needs real `(c,z,t)` coordinates + the full
+  shape/dimension order for the region offset.  Make plane writes
+  coordinate-aware (carry c/z/t and the per-axis sizes), update
+  `BioFormatsWriter` + `FakeImageWriter` + the export loop, and verify the
+  OME-TIFF behavior is byte-for-byte unchanged.
+- **Step 2 — `ZarrWriter implements ImageWriter`. — DONE.** `open()` parses
+  dims/pixelType/physical sizes from the OME-XML and builds the NGFF 0.5
+  `multiscales` metadata; creates the v3 array (chunking + sharding).
+  `writePlane` decodes the raw native-order `byte[]` into a `ucar.ma2.Array`
+  and writes at offset `[t,c,z,0,0]`.  Also writes the **OME-XML sidecar**
+  (`OME/METADATA.ome.xml`) so nothing in the source metadata is silently lost
+  (per project ethos) — and `ExportResult.warnings` flags anything not
+  represented in the NGFF JSON itself.  New codec mapping (none/gzip/zstd/
+  blosc), separate from the TIFF `Compression` enum.  Output path is a
+  **directory** (the `.zarr` store): **refuse if it already exists** (never
+  destroy user data).
+- **Step 3 — Tool + service + MCP (decided: new tool, MCP-first). — DONE.** Add a
+  **new `export_to_ngff` tool** (own Zarr-native params: codec
+  none/gzip/zstd/blosc, chunk size — NOT the TIFF `Compression` enum) reusing
+  the read/subset/budget plumbing.  Re-think the 2 GB `maxBytes` default —
+  Zarr streams to disk with bounded memory, so the TIFF-era cap is the wrong
+  knob.  Wire **MCP/stdio only for now** (schema + handler +
+  `BioImageService.exportToNgff`); HTTP, socket, and gRPC (proto message →
+  codegen + buf lint) are a deliberate follow-up.
+- **Step 4 — Tests + docs.** Round-trip: `FakeImageReader` → OME-Zarr → read
+  back with zarr-java → assert byte-exact against the deterministic pixel
+  formula; multi-channel axis order; directory-exists refusal; each codec
+  round-trips.  Docs: new DESIGN §13 + §2.x tool entry, README tool table,
+  service-endpoints.md, API-*.md, and CLAUDE.md (new build repo/dep).
+
+### Deferred to Phase 15b (not MVP)
+- Multiscale **pyramid** generation (reuse the area-average downsampler from
+  the thumbnail code) — needed for big data to be usable in napari/
+  neuroglancer; shard/chunk-size heuristics.
+- S3 store target; reading `.zarr` back through our `ImageReader`
+  (OMEZarrReader add-on or zarr-java directly).
+
+
 ## Already done
 
 - Project skeleton, Mill build, JUnit 5 tests

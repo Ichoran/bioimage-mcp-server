@@ -157,6 +157,7 @@ Deny rules always win.  See DESIGN.md §5 for details.
 | `get_plane` | PNG | Single-channel grayscale plane at full resolution |
 | `get_intensity_stats` | JSON | Min/max/mean/stddev/median, histogram, saturation warnings |
 | `export_to_tiff` | JSON | Convert to OME-TIFF with optional subsetting |
+| `export_to_ngff` | JSON | Convert to OME-Zarr (OME-NGFF 0.5, Zarr v3) for large/cloud-native data |
 
 All tools accept an absolute file path and handle large files safely
 (adaptive subsampling, time budgets).  Errors are returned as

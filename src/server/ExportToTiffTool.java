@@ -391,12 +391,19 @@ public final class ExportToTiffTool {
                         writer.setSeries(seriesIdx);
 
                         int planeIdx = 0;
-                        for (int t = tStart; t <= tEnd; t++) {
-                            for (int z = zStart; z <= zEnd; z++) {
-                                for (int ch : channels) {
+                        for (int ti = 0; ti < tCount; ti++) {
+                            int t = tStart + ti;
+                            for (int zi = 0; zi < zCount; zi++) {
+                                int z = zStart + zi;
+                                for (int ci = 0; ci < channels.length; ci++) {
                                     byte[] data = reader.readPlane(
-                                            s, ch, z, t);
-                                    writer.writePlane(planeIdx++, data);
+                                            s, channels[ci], z, t);
+                                    // planeIdx (C fastest) keeps the OME-TIFF
+                                    // index contract; ci/zi/ti are the
+                                    // output-relative coordinates a
+                                    // coordinate-addressed writer (Zarr) needs.
+                                    writer.writePlane(
+                                            planeIdx++, ci, zi, ti, data);
                                     planesWritten++;
                                 }
                             }

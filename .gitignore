@@ -35,6 +35,10 @@ out/
 # Downloaded test fixtures (large microscopy files)
 test/fixtures/
 
+# Local microscopy data and scratch space (never commit — can be huge)
+test/czi/
+temp/
+
 
 # Notes from developer to themselves
 howto.*

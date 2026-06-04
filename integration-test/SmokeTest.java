@@ -72,18 +72,18 @@ public class SmokeTest {
 
         // --- Tools list ---
         var toolsResponse = callMethod("tools/list", Map.of());
-        check("tools/list returns 6 tools",
+        check("tools/list returns 7 tools",
                 () -> {
                     var result = mapGet(toolsResponse, "result");
                     var tools = listGet(result, "tools");
-                    assertEqual(6, tools.size());
+                    assertEqual(7, tools.size());
                     var names = tools.stream()
                             .map(t -> (String) ((Map<?, ?>) t).get("name"))
                             .sorted().toList();
                     assertEqual(List.of(
-                            "export_to_tiff", "get_intensity_stats",
-                            "get_ome_metadata", "get_plane", "get_thumbnail",
-                            "inspect_image"),
+                            "export_to_ngff", "export_to_tiff",
+                            "get_intensity_stats", "get_ome_metadata",
+                            "get_plane", "get_thumbnail", "inspect_image"),
                             names);
                 });
 

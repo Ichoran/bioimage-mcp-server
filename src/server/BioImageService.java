@@ -71,6 +71,7 @@ public final class BioImageService {
 
     private final Supplier<ImageReader> readerFactory;
     private final Supplier<ImageWriter> writerFactory;
+    private final Supplier<ImageWriter> zarrWriterFactory;
 
     /**
      * Open sessions, keyed by handle.  Populated by {@link #openSession} and
@@ -83,11 +84,13 @@ public final class BioImageService {
 
     private BioImageService(List<Path> denyList, List<Path> allowList,
                             Supplier<ImageReader> readerFactory,
-                            Supplier<ImageWriter> writerFactory) {
+                            Supplier<ImageWriter> writerFactory,
+                            Supplier<ImageWriter> zarrWriterFactory) {
         this.denyList = List.copyOf(denyList);
         this.allowList = List.copyOf(allowList);
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
+        this.zarrWriterFactory = zarrWriterFactory;
         rebuildAccessControl();
     }
 
@@ -104,6 +107,7 @@ public final class BioImageService {
         private final List<Path> allowList = new ArrayList<>();
         private Supplier<ImageReader> readerFactory = BioFormatsReader::new;
         private Supplier<ImageWriter> writerFactory = BioFormatsWriter::new;
+        private Supplier<ImageWriter> zarrWriterFactory = ZarrWriter::new;
 
         /** Add a path that the server is explicitly allowed to access. */
         public Builder allow(String path) {
@@ -133,9 +137,15 @@ public final class BioImageService {
             return this;
         }
 
+        /** Override the OME-Zarr writer factory (used by {@code export_to_ngff}). */
+        public Builder zarrWriterFactory(Supplier<ImageWriter> zarrWriterFactory) {
+            this.zarrWriterFactory = zarrWriterFactory;
+            return this;
+        }
+
         public BioImageService build() {
             return new BioImageService(denyList, allowList,
-                    readerFactory, writerFactory);
+                    readerFactory, writerFactory, zarrWriterFactory);
         }
     }
 
@@ -562,6 +572,28 @@ public final class BioImageService {
             return ExportToTiffTool.execute(
                     request, pathValidator(), outputPathValidator(),
                     readerFactory, writerFactory);
+        } catch (IllegalArgumentException e) {
+            return ToolResult.invalidArgument(e.getMessage());
+        }
+    }
+
+    public ToolResult<ExportToNgffTool.NgffResult> exportToNgff(
+            Map<String, Object> args) {
+        try {
+            var request = ExportToNgffTool.Request.of(
+                    requireString(args, "path"),
+                    requireString(args, "output_path"),
+                    optInt(args, "series"),
+                    requireSlice(args, "channels"),
+                    requireSlice(args, "z"),
+                    requireSlice(args, "t"),
+                    optEnum(args, "codec", ExportToNgffTool.Codec.class),
+                    optInt(args, "compression_level"),
+                    optDuration(args, "timeout_seconds"),
+                    optLong(args, "max_bytes"));
+            return ExportToNgffTool.execute(
+                    request, pathValidator(), outputPathValidator(),
+                    readerFactory, zarrWriterFactory);
         } catch (IllegalArgumentException e) {
             return ToolResult.invalidArgument(e.getMessage());
         }
