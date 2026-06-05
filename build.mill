@@ -21,7 +21,7 @@ object `package` extends JavaModule with PublishModule {
   //   that is NOT published to Maven Central.
   def repositories = Seq(
     "https://artifacts.openmicroscopy.org/artifactory/maven/",
-    "https://artifacts.unidata.ucar.edu/repository/unidata-all/"
+    "https://artifacts.unidata.ucar.edu/all/"
   )
 
   // Disable the shell/batch launcher that Mill prepends to assembly jars.
