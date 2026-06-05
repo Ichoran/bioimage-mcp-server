@@ -7,6 +7,46 @@ identified that deserves its own step.  Re-order when priorities change.
 `../../java/bioformats` (i.e. `~/Code/java/bioformats`).  Use it to
 look up API details, pixel type constants, metadata accessors, etc.
 
+## Phase 17: Tunable shard sizing + always-reported shard depth — done
+
+- **`suggested_planes_per_shard`** — new optional `export_to_ngff` parameter
+  (MCP).  A *suggestion* (the name reflects that): when given, it replaces the
+  automatic ~1 MB byte heuristic and drives each series' shard depth.  Larger
+  values mean fewer, bigger shard files — friendlier to network filesystems
+  where per-file latency dominates; smaller values give more files and finer
+  parallel (de)compression.  The inner chunk stays one plane, so read
+  granularity is unchanged.
+- **`ZarrWriter.fitShardPlanes(n, k)`** — the rounding math.  Clamps `k` to
+  `[1, n]` (n = planes per volume = SizeZ of the exported subset), then picks
+  the planes-per-shard closest to `k` with low overshoot: candidates `k' =
+  ceil(n/ceil(n/k)) ≤ k` and `k'' = ceil(n/floor(n/k)) ≥ k`; prefer `k'` when
+  it covers strictly fewer planes; else prefer `k''` when `k''·k' ≤ k²`; else
+  weigh `log(k''/k) − log(k/k')` (size) against `log(u·k''/n) − log(v·k'/n)`
+  (space) and take `k'` if the sum is positive.  `computeShardDepths` grew a
+  suggestion parameter (4-arg overload preserved).
+- **Suggestion overrides the file-count cap.**  Automatic sizing still treats
+  the cap as a hard backstop (coarsening shards to stay under it), but an
+  explicit suggestion is honored even past the cap — the user asked for it.
+  Never silently, though: `ZarrWriter.capOverrideWarning` emits a layout
+  warning when the suggestion's file count exceeds the cap, surfaced via the
+  new `ImageWriter.layoutWarnings()` seam (default empty) into
+  `NgffResult.warnings`.
+- **Always report the actual depth.**  `NgffResult.shardPlanesPerSeries` (an
+  `int[]`, JSON `shard_planes_per_series`) carries the depth finally chosen for
+  every exported series — queried from `writer.preferredBlockDepth` after open,
+  so it reflects the byte heuristic, the suggestion, *and* any cap coarsening.
+  Reported whether or not a suggestion was given (the "if we can't give
+  feedback, rethink the scheme" requirement).
+- **Seam:** new `ImageWriter.suggestShardPlanes(int)` default no-op (OME-TIFF
+  doesn't shard); `ZarrWriter` overrides it and uses the hint at `open`.  The
+  tool calls it before `open` only when the request carries a suggestion.
+- **Validated:** 443 unit tests green (+`ZarrWriterTest` ×8: clamp bounds,
+  exact divisor, low-overshoot pick, closer-candidate tie-break,
+  cover-the-volume invariant sweep, suggestion-honored, suggestion-overrides-cap,
+  cap-warning-only-when-exceeded; +`ExportToNgffToolTest` ×4: default depth
+  reported, suggestion reported + round-trips, sub-1 rejected, layout warnings
+  surface in the result).  Docs: README "Shard sizing", MCP schema, this file.
+
 ## Phase 9: Transport separation (MCP ↔ microservice) — done
 
 - **`BioImageService`** — protocol-neutral core extracted from

@@ -74,8 +74,17 @@ public final class ZarrWriter implements ImageWriter {
 
     private Path root;
     private String codec;
+    private int suggestedShardPlanes = 0;   // 0 = none; use the byte heuristic
     private final List<SeriesArray> series = new ArrayList<>();
+    private final List<String> layoutWarnings = new ArrayList<>();
     private volatile int current = -1;
+
+    @Override
+    public void suggestShardPlanes(int planes) {
+        // Clamp the lower bound here; the per-series upper bound (planes per
+        // volume) is applied in computeShardDepths, since each series differs.
+        this.suggestedShardPlanes = Math.max(1, planes);
+    }
 
     @Override
     public void open(Path path, String omeXml, String compression)
@@ -128,7 +137,18 @@ public final class ZarrWriter implements ImageWriter {
                 sizeZ[s] = intAttr(px, "SizeZ");
                 tc[s] = (long) intAttr(px, "SizeT") * intAttr(px, "SizeC");
             }
-            int[] shardZ = computeShardDepths(planeBytes, sizeZ, tc, MAX_FILES);
+            int[] shardZ = computeShardDepths(
+                    planeBytes, sizeZ, tc, MAX_FILES, suggestedShardPlanes);
+
+            // An explicit suggestion overrides the file-count cap (the user
+            // asked for this shard size).  We honor it, but never silently — if
+            // the resulting layout exceeds the cap, warn so the caller can see
+            // the file-count cost of their choice.
+            if (suggestedShardPlanes > 0) {
+                String w = capOverrideWarning(
+                        totalFiles(shardZ, sizeZ, tc), MAX_FILES);
+                if (w != null) layoutWarnings.add(w);
+            }
 
             for (int s = 0; s < n; s++) {
                 series.add(createSeries(store, s, images.get(s), shardZ[s]));
@@ -204,22 +224,45 @@ public final class ZarrWriter implements ImageWriter {
     // Sharding policy (file count vs. write-buffer size) — see PLAN Phase 16.
     // ================================================================
 
+    /** No-suggestion overload: size every shard by the byte heuristic. */
+    static int[] computeShardDepths(long[] planeBytes, int[] sizeZ,
+                                    long[] tc, int maxFiles) {
+        return computeShardDepths(planeBytes, sizeZ, tc, maxFiles, 0);
+    }
+
     /**
      * Choose the shard depth (Z-planes per file) for each series.
      *
-     * <p>Per series: a plane already over the ~1 MB sweet spot stays one file
-     * per plane; a volume under 4 MB goes in a single file; otherwise shardZ is
-     * the smallest power of two whose block reaches ~1 MB.  Then, globally, if
-     * the total chunk-file count would exceed {@code maxFiles}, shard depths are
-     * doubled (never past a whole volume) until the count drops under the cap.
+     * <p>When {@code suggestedPlanes <= 0}, sizing is automatic, per series: a
+     * plane already over the ~1 MB sweet spot stays one file per plane; a
+     * volume under 4 MB goes in a single file; otherwise shardZ is the smallest
+     * power of two whose block reaches ~1 MB.
+     *
+     * <p>When {@code suggestedPlanes > 0}, that hint replaces the byte
+     * heuristic: each series' shard depth is {@link #fitShardPlanes} of the
+     * suggestion against that series' Z-depth (the closest even-ish fit,
+     * clamped to 1…Z).
+     *
+     * <p>With automatic sizing only, the file-count cap is a hard backstop:
+     * if the total chunk-file count would exceed {@code maxFiles}, shard depths
+     * are doubled (never past a whole volume) until the count drops under the
+     * cap.  An <b>explicit suggestion overrides the cap entirely</b> — the
+     * user's requested shard size is honored even if it produces more files;
+     * {@link #open} emits a {@link #layoutWarnings layout warning} in that case
+     * rather than quietly coarsening.  Either way callers report the value
+     * finally chosen (via {@link #preferredBlockDepth}).
      */
     static int[] computeShardDepths(long[] planeBytes, int[] sizeZ,
-                                    long[] tc, int maxFiles) {
+                                    long[] tc, int maxFiles, int suggestedPlanes) {
         int n = planeBytes.length;
         int[] shardZ = new int[n];
         for (int i = 0; i < n; i++) {
-            long pb = planeBytes[i];
             int z = sizeZ[i];
+            if (suggestedPlanes > 0) {
+                shardZ[i] = fitShardPlanes(z, suggestedPlanes);
+                continue;
+            }
+            long pb = planeBytes[i];
             if (pb > TARGET_SHARD_BYTES) {
                 shardZ[i] = 1;
             } else if ((long) z * pb < SMALL_VOLUME_BYTES) {
@@ -231,14 +274,84 @@ public final class ZarrWriter implements ImageWriter {
             }
             if (shardZ[i] < 1) shardZ[i] = 1;
         }
-        while (totalFiles(shardZ, sizeZ, tc) > maxFiles && canGrow(shardZ, sizeZ)) {
-            for (int i = 0; i < n; i++) {
-                if (shardZ[i] < sizeZ[i]) {
-                    shardZ[i] = Math.min(sizeZ[i], shardZ[i] * 2);
+        // The cap coarsens only automatic sizing; an explicit suggestion wins.
+        if (suggestedPlanes <= 0) {
+            while (totalFiles(shardZ, sizeZ, tc) > maxFiles
+                    && canGrow(shardZ, sizeZ)) {
+                for (int i = 0; i < n; i++) {
+                    if (shardZ[i] < sizeZ[i]) {
+                        shardZ[i] = Math.min(sizeZ[i], shardZ[i] * 2);
+                    }
                 }
             }
         }
         return shardZ;
+    }
+
+    /**
+     * The warning emitted when an explicit shard suggestion drives the file
+     * count past {@code maxFiles}; {@code null} when the count is within the
+     * cap.  Honoring the suggestion is correct, but the caller must be told the
+     * cap was exceeded (many small files are slow to list and to serve over a
+     * network filesystem).
+     */
+    static String capOverrideWarning(long fileCount, int maxFiles) {
+        if (fileCount <= maxFiles) return null;
+        return "suggested_planes_per_shard produced " + fileCount
+                + " shard files, exceeding the recommended cap of " + maxFiles
+                + ". The suggestion was honored as requested, but this many"
+                + " files can be slow to list and to serve over a network"
+                + " filesystem; raise suggested_planes_per_shard for fewer,"
+                + " larger files.";
+    }
+
+    @Override
+    public List<String> layoutWarnings() {
+        return List.copyOf(layoutWarnings);
+    }
+
+    /**
+     * Given a volume of {@code n} planes and a <em>suggested</em> {@code k}
+     * planes per shard, return the actual planes-per-shard to use: the value
+     * closest to {@code k} that divides the volume into shards with low
+     * overshoot, clamped to {@code [1, n]}.
+     *
+     * <p>Two candidates bracket {@code k}: with {@code v = ceil(n/k)} shards the
+     * even fit is {@code k' = ceil(n/v) <= k}; with {@code u = floor(n/k)} shards
+     * it is {@code k'' = ceil(n/u) >= k}.  We prefer {@code k'} when its shards
+     * cover strictly fewer total planes ({@code v*k' < u*k''}); otherwise we
+     * prefer {@code k''} when it is multiplicatively at least as close to
+     * {@code k} ({@code k''*k' <= k*k}).  In the remaining case {@code k''} is
+     * the bigger relative jump but {@code k'} wastes more space, so we weigh the
+     * two: the log size disparity {@code log(k''/k) - log(k/k')} (positive) plus
+     * the log nominal-space disparity {@code log(u*k''/n) - log(v*k'/n)}
+     * (negative).  A positive sum means {@code k''} strays too far from {@code k}
+     * for the tighter packing to be worth it, so we take {@code k'}; otherwise
+     * {@code k''}.
+     */
+    static int fitShardPlanes(int n, int k) {
+        if (n <= 1 || k <= 1) return 1;
+        if (k >= n) return n;                  // whole volume in one shard
+        int v = ceilDiv(n, k);                 // more shards  → kp <= k
+        int kp = ceilDiv(n, v);
+        int u = n / k;                         // fewer shards → kpp >= k (u >= 1)
+        int kpp = ceilDiv(n, u);
+        if (kp == kpp) return kp;              // k divides cleanly, etc.
+
+        long coverDown = (long) v * kp;        // planes covered by the kp packing
+        long coverUp = (long) u * kpp;         //   "       "      "  the kpp packing
+        if (coverDown < coverUp) return kp;
+        // coverDown >= coverUp: the kpp packing is at least as tight.
+        if ((long) kpp * kp <= (long) k * k) return kpp;   // kpp also ≥-as-close to k
+        // kp is the closer ratio but kpp packs tighter — weigh size vs. space.
+        double sizeDisparity = Math.log((double) kpp / k) - Math.log((double) k / kp);
+        double spaceDisparity = Math.log((double) coverUp / n)
+                              - Math.log((double) coverDown / n);
+        return (sizeDisparity + spaceDisparity > 0) ? kp : kpp;
+    }
+
+    private static int ceilDiv(int a, int b) {
+        return (a + b - 1) / b;
     }
 
     private static long totalFiles(int[] shardZ, int[] sizeZ, long[] tc) {

@@ -162,6 +162,31 @@ chosen so a server sharing a machine doesn't assume all CPUs are its own.
 The pool is **server-wide** — total compression is capped regardless of how
 many clients connect.
 
+### Shard sizing
+
+By default `export_to_ngff` sizes each shard file automatically (~1 MB of
+pixels), which gives good parallel (de)compression but can produce a great
+many files for large volumetric/time-series data — costly to serve over a
+network filesystem where each file operation is a round-trip.  Pass
+`suggested_planes_per_shard` to bundle more Z-planes into each file:
+
+- It is a **suggestion**, not an exact count.  The server picks the value
+  closest to your hint that divides each series' volume into shards with low
+  overshoot, clamped to `1…planes-per-volume`.
+- An explicit suggestion **overrides** the server's internal file-count cap:
+  it is honored even if it produces a great many files (you asked for it).
+  When the cap is exceeded, a warning is included in the result so the
+  file-count cost is never hidden.  (Automatic sizing, by contrast, treats the
+  cap as a hard backstop and coarsens shards to stay under it.)
+- The value actually chosen is always reported back as
+  `shard_planes_per_series` (one entry per exported series), whether sizing
+  was automatic or hinted — so you can see exactly how the data landed on
+  disk and adjust.
+
+The inner read granularity is always one plane, so larger shards never make
+single-plane reads more expensive — they only change how planes are grouped
+into files.
+
 
 ## Tools
 

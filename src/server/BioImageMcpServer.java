@@ -39,7 +39,7 @@ import java.util.Map;
 public class BioImageMcpServer {
 
     static final String NAME = "bioimage-mcp";
-    static final String VERSION = "0.3.0";
+    static final String VERSION = "0.3.1";
 
     /**
      * Server-level instructions shown to the LLM when it discovers
@@ -629,6 +629,20 @@ public class BioImageMcpServer {
                         + "Valid ranges: gzip 0-9, zstd -7 to 22 (negative "
                         + "levels are the fastest), blosc 0-9. Not applicable "
                         + "to codec 'none'."));
+        props.put("suggested_planes_per_shard", Map.of(
+                "type", "integer",
+                "description", "Suggested number of Z-planes to bundle into each "
+                        + "on-disk shard file (default: automatic ~1 MB sizing). "
+                        + "Larger values mean fewer, bigger files — better when "
+                        + "serving over a network filesystem where per-file "
+                        + "latency dominates; smaller values give more files and "
+                        + "finer-grained parallel (de)compression. This is only a "
+                        + "hint: the server picks the closest even fit (clamped to "
+                        + "1..planes-per-volume). An explicit suggestion overrides "
+                        + "the internal file-count cap and is honored even if it "
+                        + "yields very many files (a warning is returned when the "
+                        + "cap is exceeded). The actual value chosen is returned as "
+                        + "'shard_planes_per_series'."));
         props.put("timeout_seconds", Map.of(
                 "type", "integer",
                 "description", "Wall-clock time limit in seconds (default: 1800)"));

@@ -40,7 +40,7 @@ completed or priorities change.
   from the former `build.mill.yaml` because YAML cannot express a custom
   code-generation task, and the gRPC transport needs one.
 - Main sources are in `src/server/` with package `lab.kerrr.mcpbio.bioimageserver`.
-- The JVM target is Java 21.
+- The JVM target is Java 21.  The JBang runners pin the same with `//JAVA 21`.
 - Bio-Formats is fetched from the OME Maven repository at
   `https://artifacts.openmicroscopy.org/artifactory/maven/`.
 - **Protobuf/gRPC codegen:** `.proto` files live in `src/proto/`.  A

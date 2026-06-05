@@ -39,6 +39,25 @@ public interface ImageWriter extends AutoCloseable {
     void open(Path path, String omeXml, String compression) throws IOException;
 
     /**
+     * Suggest a target number of planes to bundle into each storage shard,
+     * for writers that shard (OME-Zarr).  This is a <b>hint</b>, not a
+     * command: the writer chooses the closest value that divides each
+     * series' volume with low overshoot (clamped to 1…planes-per-volume),
+     * and may further coarsen it to honor a global file-count cap.  Query
+     * {@link #preferredBlockDepth(int)} after {@link #open} to learn the
+     * value actually chosen for each series.
+     *
+     * <p>Must be called before {@link #open} to take effect.  The default
+     * implementation ignores it (plane-addressed writers such as OME-TIFF do
+     * not shard); {@link ZarrWriter} overrides it.
+     *
+     * @param planes suggested planes per shard (≥ 1)
+     */
+    default void suggestShardPlanes(int planes) {
+        // No-op: non-sharding writers have no shard to size.
+    }
+
+    /**
      * Set the current series for subsequent {@link #writePlane} calls.
      *
      * @param series zero-based series index
@@ -139,6 +158,23 @@ public interface ImageWriter extends AutoCloseable {
             System.arraycopy(data, k * planeLen, plane, 0, planeLen);
             writePlane(planeIndex + k, c, zStart + k, t, plane);
         }
+    }
+
+    /**
+     * Warnings about the on-disk layout the writer chose at {@link #open}
+     * time, to be surfaced to the caller alongside the export result.
+     *
+     * <p>The canonical case is an OME-Zarr export whose
+     * {@link #suggestShardPlanes suggested} shard depth produced more files
+     * than the writer's recommended file-count cap: the suggestion is honored
+     * (the user asked for it), but the caller is told the cap was exceeded so
+     * the choice is never silently lossy.  Valid only after {@link #open}.
+     *
+     * <p>The default implementation returns an empty list (writers with no
+     * layout choices to report).
+     */
+    default java.util.List<String> layoutWarnings() {
+        return java.util.List.of();
     }
 
     /**

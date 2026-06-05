@@ -58,7 +58,7 @@ class ExportToNgffToolTest {
             Slice channels, Slice z, Slice t, Codec codec, Integer level) {
         var request = ExportToNgffTool.Request.of(
                 "/input.tif", out.toString(), null,
-                channels, z, t, codec, level, TIMEOUT, MAX_BYTES);
+                channels, z, t, codec, level, null, TIMEOUT, MAX_BYTES);
         var result = ExportToNgffTool.execute(
                 request, PathValidator.allowAll(), rf, ZarrWriter::new, POOL);
         if (result instanceof ToolResult.Failure<NgffResult> f) {
@@ -146,6 +146,85 @@ class ExportToNgffToolTest {
     }
 
     @Test
+    void reportsActualShardDepthByDefault(@TempDir Path dir) {
+        // A small 10-plane volume (16×16 uint16 ≈ 5 KB) fits in one shard, so
+        // the auto policy reports the whole volume — always reported, no hint.
+        Path store = dir.resolve("auto.zarr");
+        NgffResult r = exportOk(reader(1, 10, 1), store,
+                Slice.all(), Slice.all(), Slice.all());
+        assertArrayEquals(new int[]{10}, r.shardPlanesPerSeries());
+    }
+
+    @Test
+    void suggestedPlanesPerShardIsReported(@TempDir Path dir) throws Exception {
+        // Suggest 3 planes/shard on a 10-plane volume → fits to 3 (4 shards),
+        // reported back, and the data still round-trips.
+        Path store = dir.resolve("hint.zarr");
+        var request = ExportToNgffTool.Request.of(
+                "/input.tif", store.toString(), null,
+                Slice.all(), Slice.all(), Slice.all(),
+                Codec.NONE, null, 3, TIMEOUT, MAX_BYTES);
+        var result = ExportToNgffTool.execute(
+                request, PathValidator.allowAll(), reader(1, 10, 1),
+                ZarrWriter::new, POOL);
+        var r = ((ToolResult.Success<NgffResult>) result).value();
+        assertArrayEquals(new int[]{3}, r.shardPlanesPerSeries());
+
+        ucar.ma2.Array all = readBack(store, 1, 1, 10);
+        int i = 0;
+        for (int z = 0; z < 10; z++)
+            for (int y = 0; y < SY; y++)
+                for (int x = 0; x < SX; x++) {
+                    int got = all.getShort(i++) & 0xFFFF;
+                    assertEquals(rawValue(x, y, 0, z, 0), got);
+                }
+    }
+
+    @Test
+    void layoutWarningsSurfaceInResult(@TempDir Path dir) {
+        // A writer that reports a layout warning (as ZarrWriter does when a
+        // suggestion overrides the file-count cap) must have it land in the
+        // result's warnings — the cap override is honored but never silent.
+        final String MSG = "synthetic layout warning";
+        Supplier<ImageWriter> wf = () -> new ImageWriter() {
+            final ZarrWriter d = new ZarrWriter();
+            public void open(Path p, String x, String c) throws IOException {
+                d.open(p, x, c);
+            }
+            public void setSeries(int s) throws IOException { d.setSeries(s); }
+            public int preferredBlockDepth(int s) { return d.preferredBlockDepth(s); }
+            public void writeBlock(int i, int c, int z, int t, int bz, byte[] dat)
+                    throws IOException { d.writeBlock(i, c, z, t, bz, dat); }
+            public void writePlane(int i, byte[] dat) throws IOException {
+                d.writePlane(i, dat);
+            }
+            public java.util.List<String> layoutWarnings() {
+                return java.util.List.of(MSG);
+            }
+            public long getBytesWritten() { return d.getBytesWritten(); }
+            public void close() throws IOException { d.close(); }
+        };
+        var request = ExportToNgffTool.Request.of(
+                "/input.tif", dir.resolve("w.zarr").toString(), null,
+                Slice.all(), Slice.all(), Slice.all(),
+                Codec.NONE, null, null, TIMEOUT, MAX_BYTES);
+        var result = ExportToNgffTool.execute(
+                request, PathValidator.allowAll(), reader(1, 2, 1), wf, POOL);
+        var r = ((ToolResult.Success<NgffResult>) result).value();
+        assertTrue(r.warnings().contains(MSG), r.warnings().toString());
+    }
+
+    @Test
+    void suggestionBelowOneRejected() {
+        var ex = assertThrows(IllegalArgumentException.class,
+                () -> ExportToNgffTool.Request.of(
+                        "/in.tif", "/out.zarr", null,
+                        Slice.all(), Slice.all(), Slice.all(),
+                        Codec.NONE, null, 0, TIMEOUT, MAX_BYTES));
+        assertTrue(ex.getMessage().contains("at least 1"), ex.getMessage());
+    }
+
+    @Test
     void writesValidNgffStructure(@TempDir Path dir) throws Exception {
         Path store = dir.resolve("out.zarr");
         exportOk(reader(1, 1, 1), store, Slice.all(), Slice.all(), Slice.all());
@@ -164,7 +243,7 @@ class ExportToNgffToolTest {
         var request = ExportToNgffTool.Request.of(
                 "/input.tif", store.toString(), null,
                 Slice.all(), Slice.all(), Slice.all(),
-                Codec.NONE, null, TIMEOUT, MAX_BYTES);
+                Codec.NONE, null, null, TIMEOUT, MAX_BYTES);
         var result = ExportToNgffTool.execute(
                 request, PathValidator.allowAll(), reader(1, 1, 1), ZarrWriter::new, POOL);
         assertInstanceOf(ToolResult.Failure.class, result);
@@ -181,7 +260,7 @@ class ExportToNgffToolTest {
         var request = ExportToNgffTool.Request.of(
                 "/input.tif", dir.resolve("out.zarr").toString(), null,
                 Slice.all(), Slice.all(), Slice.all(),
-                Codec.NONE, null, TIMEOUT, MAX_BYTES);
+                Codec.NONE, null, null, TIMEOUT, MAX_BYTES);
         var result = ExportToNgffTool.execute(
                 request, selective, selective, reader(1, 1, 1), ZarrWriter::new, POOL);
         assertInstanceOf(ToolResult.Failure.class, result);
@@ -196,7 +275,7 @@ class ExportToNgffToolTest {
         var request = new ExportToNgffTool.Request(
                 "/input.tif", dir.resolve("out.zarr").toString(), null,
                 Slice.all(), Slice.all(), Slice.all(),
-                Codec.NONE, null, TIMEOUT, 1000);
+                Codec.NONE, null, null, TIMEOUT, 1000);
         var result = ExportToNgffTool.execute(
                 request, PathValidator.allowAll(), reader(2, 2, 2), ZarrWriter::new, POOL);
         assertInstanceOf(ToolResult.Failure.class, result);
@@ -241,7 +320,7 @@ class ExportToNgffToolTest {
                 () -> ExportToNgffTool.Request.of(
                         "/in.tif", "/out.zarr", null,
                         Slice.all(), Slice.all(), Slice.all(),
-                        Codec.ZSTD, 99, TIMEOUT, MAX_BYTES));
+                        Codec.ZSTD, 99, null, TIMEOUT, MAX_BYTES));
         assertTrue(ex.getMessage().contains("out of range"), ex.getMessage());
     }
 
@@ -251,7 +330,7 @@ class ExportToNgffToolTest {
         var req = ExportToNgffTool.Request.of(
                 "/in.tif", dir.resolve("o.zarr").toString(), null,
                 Slice.all(), Slice.all(), Slice.all(),
-                null, null, null, null);
+                null, null, null, null, null);
         assertEquals(Codec.ZSTD, req.codec());
         assertEquals(5, req.compressionLevel());
     }
@@ -262,12 +341,12 @@ class ExportToNgffToolTest {
         var gz = ExportToNgffTool.Request.of(
                 "/in.tif", "/o.zarr", null,
                 Slice.all(), Slice.all(), Slice.all(),
-                Codec.GZIP, null, null, null);
+                Codec.GZIP, null, null, null, null);
         assertNull(gz.compressionLevel());
         var bl = ExportToNgffTool.Request.of(
                 "/in.tif", "/o.zarr", null,
                 Slice.all(), Slice.all(), Slice.all(),
-                Codec.BLOSC, null, null, null);
+                Codec.BLOSC, null, null, null, null);
         assertNull(bl.compressionLevel());
     }
 
@@ -277,7 +356,7 @@ class ExportToNgffToolTest {
                 () -> ExportToNgffTool.Request.of(
                         "/in.tif", "/out.zarr", null,
                         Slice.all(), Slice.all(), Slice.all(),
-                        Codec.NONE, 5, TIMEOUT, MAX_BYTES));
+                        Codec.NONE, 5, null, TIMEOUT, MAX_BYTES));
         assertTrue(ex.getMessage().contains("not applicable"), ex.getMessage());
     }
 
@@ -308,7 +387,7 @@ class ExportToNgffToolTest {
         var request = ExportToNgffTool.Request.of(
                 "/input.tif", store.toString(), null,
                 Slice.all(), Slice.all(), Slice.all(),
-                Codec.NONE, null, TIMEOUT, MAX_BYTES);
+                Codec.NONE, null, null, TIMEOUT, MAX_BYTES);
         var result = ExportToNgffTool.execute(
                 request, PathValidator.allowAll(),
                 reader(2, 2, 2), FailingWriter::new, POOL);

@@ -293,7 +293,7 @@ The tradeoff is that future *computational* tools (segmentation, ML inference)
 will want the Python scientific stack.  This is explicitly out of scope for the
 POC and addressed in the extensibility plan (§6).
 
-### 3.2 Implementation Language: Java (25+)
+### 3.2 Implementation Language: Java (21+)
 
 **Decision:** Modern Java, targeting Java 21 LTS.
 
@@ -725,7 +725,7 @@ planes and composes the contiguous buffer itself.
 On connect the server sends a hello:
 
 ```json
-{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.3.0"}
+{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.3.1"}
 ```
 
 **Deposit** (one in flight per connection, sequential; `id` is client-chosen

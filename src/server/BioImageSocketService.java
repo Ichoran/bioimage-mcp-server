@@ -69,7 +69,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class BioImageSocketService {
 
     static final String NAME = "bioimage-socket";
-    static final String VERSION = "0.3.0";
+    static final String VERSION = "0.3.1";
     static final int PROTOCOL = 1;
 
     private final BioImageService service;

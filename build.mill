@@ -10,7 +10,7 @@ import mill.api.PathRef
 // fetched from Maven (no system protoc required).
 object `package` extends JavaModule with PublishModule {
 
-  def publishVersion = "0.3.0"
+  def publishVersion = "0.3.1"
   def artifactName = "bioimage_mcp_server"
 
   def jvmVersion = "21"
@@ -68,8 +68,8 @@ object `package` extends JavaModule with PublishModule {
     mvn"io.grpc:grpc-stub:$grpcVersion",
     mvn"com.google.protobuf:protobuf-java:$protobufVersion",
     // Provides javax.annotation.Generated, referenced by grpc-generated stubs
-    // but absent on JDK 21.  jakarta.annotation does NOT satisfy it (the
-    // generated code names the javax.annotation package specifically).
+    // but absent from the JDK (removed in Java 11).  jakarta.annotation does
+    // NOT satisfy it (the generated code names the javax.annotation package).
     mvn"org.apache.tomcat:annotations-api:6.0.53"
   )
 

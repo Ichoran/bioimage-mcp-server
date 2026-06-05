@@ -247,6 +247,7 @@ final class JsonUtil {
         map.put("codec", r.codec().name().toLowerCase());
         map.put("compression_level",
                 r.compressionLevel() != null ? r.compressionLevel() : "default");
+        map.put("shard_planes_per_series", r.shardPlanesPerSeries());
         map.put("format", "ome_ngff");
         map.put("ngff_version", "0.5");
         map.put("source_format", r.sourceFormat());

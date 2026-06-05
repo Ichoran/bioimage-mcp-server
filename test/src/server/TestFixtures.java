@@ -14,7 +14,7 @@ import java.time.Duration;
  *
  * <p>Files are cached in {@code test/fixtures/} under the project root,
  * which is located by walking up from the current working directory
- * until we find {@code build.mill.yaml}.  This survives Mill's test
+ * until we find {@code build.mill}.  This survives Mill's test
  * sandboxing (which sets the CWD to a directory under {@code out/}).
  *
  * <p>If a fixture is not present, it is downloaded from its URL on
@@ -41,7 +41,7 @@ final class TestFixtures {
     record FixtureDef(String filename, String url) {}
 
     /**
-     * Walk up from the CWD looking for {@code build.mill.yaml}.  When
+     * Walk up from the CWD looking for {@code build.mill}.  When
      * found, verify that {@code test/} exists at the same level, and
      * return {@code test/fixtures/} under it.  Returns {@code null}
      * if we hit the filesystem root without finding the marker.
@@ -49,7 +49,7 @@ final class TestFixtures {
     private static Path findFixturesDir() {
         Path dir = Path.of("").toAbsolutePath();
         while (dir != null) {
-            if (Files.isRegularFile(dir.resolve("build.mill.yaml"))) {
+            if (Files.isRegularFile(dir.resolve("build.mill"))) {
                 Path testDir = dir.resolve("test");
                 if (Files.isDirectory(testDir)) {
                     return testDir.resolve("fixtures");

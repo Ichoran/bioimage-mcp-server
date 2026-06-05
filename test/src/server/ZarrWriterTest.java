@@ -262,6 +262,92 @@ class ZarrWriterTest {
         assertTrue((long) 100_000 * ((200 + s[0] - 1) / s[0]) <= ZarrWriter.MAX_FILES);
     }
 
+    // ---- suggested planes per shard (fitShardPlanes) ----
+
+    @Test
+    void fitClampsToVolumeBounds() {
+        // k below 1 or n <= 1 → one plane per shard; k at or above n → whole volume.
+        assertEquals(1, ZarrWriter.fitShardPlanes(50, 1));
+        assertEquals(1, ZarrWriter.fitShardPlanes(50, 0));
+        assertEquals(1, ZarrWriter.fitShardPlanes(1, 10));
+        assertEquals(50, ZarrWriter.fitShardPlanes(50, 50));
+        assertEquals(50, ZarrWriter.fitShardPlanes(50, 999));
+    }
+
+    @Test
+    void fitExactDivisorIsUnchanged() {
+        // k that already divides n cleanly is returned as-is.
+        assertEquals(25, ZarrWriter.fitShardPlanes(100, 25));
+        assertEquals(20, ZarrWriter.fitShardPlanes(100, 20));
+        assertEquals(10, ZarrWriter.fitShardPlanes(100, 10));
+    }
+
+    @Test
+    void fitPrefersLowOvershootDivisor() {
+        // n=100,k=30: v=4→k'=25 (covers 100), u=3→k''=34 (covers 102).
+        // v*k' < u*k'' → pick the exact-fitting 25.
+        assertEquals(25, ZarrWriter.fitShardPlanes(100, 30));
+        // n=100,k=33: 25 (covers 100) still beats 34 (covers 102) on the first
+        // rule, even though 34 is numerically closer — the exact fit wins.
+        assertEquals(25, ZarrWriter.fitShardPlanes(100, 33));
+    }
+
+    @Test
+    void fitTakesCloserCandidateWhenSpaceTies() {
+        // n=100,k=40: v=3→k'=34 (covers 102), u=2→k''=50 (covers 100).
+        // u*k'' <= v*k', and 34 is the closer ratio, so the weighed tie-break
+        // keeps 34 rather than jumping to 50.
+        assertEquals(34, ZarrWriter.fitShardPlanes(100, 40));
+    }
+
+    @Test
+    void fitResultAlwaysCoversVolume() {
+        // Whatever it picks, ceil(n/k*) shards of k* planes must cover n, and
+        // k* must stay within [1, n].
+        for (int n = 2; n <= 64; n++) {
+            for (int k = 1; k <= n + 5; k++) {
+                int ks = ZarrWriter.fitShardPlanes(n, k);
+                assertTrue(ks >= 1 && ks <= n,
+                        "n=" + n + " k=" + k + " → " + ks + " out of [1," + n + "]");
+                int shards = (n + ks - 1) / ks;
+                assertTrue((long) shards * ks >= n,
+                        "n=" + n + " k=" + k + " → " + ks + " fails to cover");
+            }
+        }
+    }
+
+    @Test
+    void suggestionOverridesFileCap() {
+        // The same pathological 200 Z × 100k (t·c) case the auto policy coarsens
+        // all the way to 200 (shardPolicyHonorsFileCap): an explicit suggestion
+        // of 1 is honored (stays 1) even though the file count blows past the cap.
+        int[] s = ZarrWriter.computeShardDepths(
+                new long[]{100 * 1024}, new int[]{200}, new long[]{100_000},
+                ZarrWriter.MAX_FILES, 1);
+        assertEquals(1, s[0]);
+        assertTrue((long) 100_000 * 200 > ZarrWriter.MAX_FILES);
+    }
+
+    @Test
+    void capOverrideWarningOnlyWhenExceeded() {
+        assertNull(ZarrWriter.capOverrideWarning(100, 128));
+        assertNull(ZarrWriter.capOverrideWarning(128, 128));   // at the cap is fine
+        String w = ZarrWriter.capOverrideWarning(500, 128);
+        assertNotNull(w);
+        assertTrue(w.contains("500") && w.contains("128"), w);
+    }
+
+    @Test
+    void shardPolicyHonorsSuggestion() {
+        // 200 Z, plane well under 1 MB: the byte heuristic would pick 16, but a
+        // suggestion of 30 fits to 29 (v=7 shards → ceil(200/7)=29, covering 203,
+        // a tighter fit than u=6 → 34 covering 204).
+        int[] s = ZarrWriter.computeShardDepths(
+                new long[]{100 * 1024}, new int[]{200}, new long[]{1},
+                ZarrWriter.MAX_FILES, 30);
+        assertEquals(29, s[0]);
+    }
+
     @Test
     void indexOnlyWriteUnsupported(@TempDir Path dir) throws Exception {
         try (var w = new ZarrWriter()) {

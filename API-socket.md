@@ -82,7 +82,7 @@ socket file on exit.
 On connect, the server immediately sends a hello:
 
 ```json
-{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.3.0"}
+{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.3.1"}
 ```
 
 `protocol` is the wire-protocol version (currently `1`).  Read this line
