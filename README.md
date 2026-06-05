@@ -63,7 +63,7 @@ and future invocations will no longer have access.
 Run
 
 ```sh
-jbang https://github.com/ichoran/bioimage-mcp-server/blob/main/runner/bioimage-grpc.java \
+jbang https://github.com/ichoran/bioimage-mcp-server/blob/main/runner/bioimage_grpc.java \
   --allow /network/core/confocal/JaneDoe
 ```
 
