@@ -165,8 +165,9 @@ public final class ZarrWriter implements ImageWriter {
         // when the source has them, an `omero` block surfacing channel
         // names/colors up front (what napari/vizarr read) rather than leaving
         // them buried in the OME-XML sidecar.
-        var ome = multiscales(spaceUnit, scaleZ, scaleY, scaleX);
-        var omero = buildOmero(pixels, dataType);
+        String imageName = imageName(pixels);
+        var ome = multiscales(imageName, spaceUnit, scaleZ, scaleY, scaleX);
+        var omero = buildOmero(pixels, dataType, imageName);
         if (omero != null) ome.put("omero", omero);
         var imageAttrs = new Attributes();
         imageAttrs.set("ome", ome);
@@ -427,7 +428,8 @@ public final class ZarrWriter implements ImageWriter {
 
     /** Build the NGFF 0.5 {@code ome} attribute for one image. */
     private static Map<String, Object> multiscales(
-            String spaceUnit, double scaleZ, double scaleY, double scaleX) {
+            String name, String spaceUnit,
+            double scaleZ, double scaleY, double scaleX) {
         List<Map<String, Object>> axes = List.of(
                 axis("t", "time", null),
                 axis("c", "channel", null),
@@ -444,6 +446,7 @@ public final class ZarrWriter implements ImageWriter {
         dataset.put("coordinateTransformations", List.of(scale));
 
         var multiscale = new LinkedHashMap<String, Object>();
+        if (name != null) multiscale.put("name", name);   // standard NGFF image name
         multiscale.put("axes", axes);
         multiscale.put("datasets", List.of(dataset));
 
@@ -472,7 +475,8 @@ public final class ZarrWriter implements ImageWriter {
      * (no names and no colors), so we never fabricate channel info that the
      * file did not actually contain.
      */
-    private static Map<String, Object> buildOmero(Element pixels, DataType dataType) {
+    private static Map<String, Object> buildOmero(
+            Element pixels, DataType dataType, String name) {
         List<Element> chans = OmeXmlSurgery.getChildElements(pixels, null, "Channel");
         if (chans.isEmpty()) return null;
 
@@ -481,15 +485,15 @@ public final class ZarrWriter implements ImageWriter {
         var channels = new ArrayList<Map<String, Object>>();
         for (int i = 0; i < chans.size(); i++) {
             Element ch = chans.get(i);
-            String name = ch.getAttribute("Name");
+            String chName = ch.getAttribute("Name");
             String colorAttr = ch.getAttribute("Color");
-            boolean hasName = name != null && !name.isBlank();
+            boolean hasName = chName != null && !chName.isBlank();
             String hex = (colorAttr == null || colorAttr.isBlank())
                     ? null : omeColorToHex(colorAttr);
             if (hasName || hex != null) anyRealMetadata = true;
 
             var cm = new LinkedHashMap<String, Object>();
-            cm.put("label", hasName ? name : "Channel " + i);
+            cm.put("label", hasName ? chName : "Channel " + i);
             if (hex != null) cm.put("color", hex);
             if (range != null) {
                 var w = new LinkedHashMap<String, Object>();
@@ -510,9 +514,19 @@ public final class ZarrWriter implements ImageWriter {
         rdefs.put("model", channels.size() > 1 ? "color" : "greyscale");
 
         var omero = new LinkedHashMap<String, Object>();
+        if (name != null) omero.put("name", name);
         omero.put("channels", channels);
         omero.put("rdefs", rdefs);
         return omero;
+    }
+
+    /** The image's display name from the OME-XML {@code <Image Name>}, or null. */
+    private static String imageName(Element pixels) {
+        if (pixels.getParentNode() instanceof Element image) {
+            String n = image.getAttribute("Name");
+            if (n != null && !n.isBlank()) return n;
+        }
+        return null;
     }
 
     /** Inclusive display range for an integer pixel type; null for float types. */

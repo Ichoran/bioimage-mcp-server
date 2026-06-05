@@ -207,6 +207,8 @@ class ZarrWriterTest {
         assertTrue(img.contains("\"label\":\"GFP\""), img);
         assertTrue(img.contains("\"color\":\"0000FF\""), img);   // blue (RGBA 65535)
         assertTrue(img.contains("\"color\":\"00FF00\""), img);   // green
+        // image name surfaced in both multiscales and omero
+        assertTrue(img.contains("\"name\":\"t\""), img);
     }
 
     @Test

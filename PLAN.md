@@ -408,13 +408,17 @@ writer pool (so compression actually uses the cores).
   stays up.  Success is returned only after every block future completed
   without error (a dead worker can't masquerade as a finished export).  An
   "already exists" open refusal never deletes (the path is the user's).
-- **Channel metadata up front.** The image group's NGFF `omero` block now
+- **Channel + image metadata up front.** The image group's NGFF `omero` block
   carries each channel's `label` (name) + `color` (and a neutral type-range
-  `window`), parsed from the OME-XML `<Channel>` elements — so channel
-  names/colors are first-class for napari/vizarr, the analogue of how physical
-  units ride along in the multiscales scale, not just buried in the sidecar.
-  Omitted entirely when the source has no channel names/colors (never
-  fabricated).  `ZarrWriter.buildOmero`.
+  `window`), parsed from the OME-XML `<Channel>` elements; the image `name`
+  rides along in both `omero.name` and the standard `multiscales[].name`.  So
+  channel names/colors/image name are first-class for napari/vizarr, the
+  analogue of how physical units ride in the multiscales scale, not just buried
+  in the sidecar.  Omitted entirely when the source has no channel names/colors
+  (never fabricated).  `ZarrWriter.buildOmero` / `imageName`.
+  - **Deferred (issue #3):** set the omero `window` to the *measured*
+    per-channel min/max (cheap — we read every plane during export anyway;
+    needs a `close()`-time metadata update) instead of the neutral type range.
 - **Validated:** 429 unit tests (sharding-policy rules + cap; concurrent
   disjoint-*block* writes; forced-write-error fails op + deletes store;
   `--parallelism` resolver + wiring; omero present-with-names / absent-without);
