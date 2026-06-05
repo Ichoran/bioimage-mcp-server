@@ -50,7 +50,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class BioImageGrpcService {
 
     static final String NAME = "bioimage-grpc";
-    static final String VERSION = "0.3.0";
+    static final String VERSION = "0.3.1";
     static final int PROTOCOL = 1;
     static final int DEFAULT_PORT = 8723;
 

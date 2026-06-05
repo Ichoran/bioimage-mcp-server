@@ -673,6 +673,7 @@ public final class BioImageService {
                     requireSlice(args, "t"),
                     optEnum(args, "codec", ExportToNgffTool.Codec.class),
                     optInt(args, "compression_level"),
+                    optInt(args, "suggested_planes_per_shard"),
                     optDuration(args, "timeout_seconds"),
                     optLong(args, "max_bytes"));
             return ExportToNgffTool.execute(

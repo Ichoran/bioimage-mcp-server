@@ -56,6 +56,20 @@ public final class ExportToNgffTool {
      *                    Lower is faster / larger; higher is slower / smaller.
      *                    Valid ranges: gzip 0–9, zstd −7…22 (negative favors
      *                    speed), blosc 0–9.  Not applicable to {@code none}.
+     * @param suggestedPlanesPerShard  hint for how many Z-planes to bundle into
+     *                    each on-disk shard file (null = automatic ~1 MB
+     *                    sizing).  Larger values mean fewer, bigger files —
+     *                    friendlier to network filesystems where per-file
+     *                    latency dominates; smaller values mean more files and
+     *                    finer-grained parallel (de)compression.  It is only a
+     *                    suggestion: the writer picks the closest even fit
+     *                    (clamped to 1…planes-per-volume).  Unlike automatic
+     *                    sizing, an explicit suggestion <b>overrides</b> the
+     *                    writer's file-count cap — it is honored even if it
+     *                    yields many files, with a warning added to
+     *                    {@link NgffResult#warnings} when the cap is exceeded.
+     *                    The actual value chosen is reported per series in
+     *                    {@link NgffResult#shardPlanesPerSeries}.
      * @param timeout     wall-clock time limit
      * @param maxBytes    approximate cap on raw pixel bytes to read+write
      */
@@ -68,6 +82,7 @@ public final class ExportToNgffTool {
             Slice t,
             Codec codec,
             Integer compressionLevel,
+            Integer suggestedPlanesPerShard,
             Duration timeout,
             long maxBytes) {
 
@@ -105,6 +120,10 @@ public final class ExportToNgffTool {
                     case BLOSC -> requireLevel(compressionLevel, 0, 9, "blosc");
                 }
             }
+            if (suggestedPlanesPerShard != null && suggestedPlanesPerShard < 1) {
+                throw new IllegalArgumentException(
+                        "suggested_planes_per_shard must be at least 1");
+            }
             if (timeout == null || timeout.isNegative() || timeout.isZero()) {
                 throw new IllegalArgumentException("timeout must be positive");
             }
@@ -116,6 +135,7 @@ public final class ExportToNgffTool {
         public static Request of(String inputPath, String outputPath,
                                   Integer series, Slice channels, Slice z, Slice t,
                                   Codec codec, Integer compressionLevel,
+                                  Integer suggestedPlanesPerShard,
                                   Duration timeout, Long maxBytes) {
             Codec effectiveCodec = codec != null ? codec : Codec.ZSTD;
             // When the codec is zstd and no level is given, pin level 5
@@ -128,7 +148,7 @@ public final class ExportToNgffTool {
             }
             return new Request(
                     inputPath, outputPath, series, channels, z, t,
-                    effectiveCodec, level,
+                    effectiveCodec, level, suggestedPlanesPerShard,
                     timeout != null ? timeout : DEFAULT_TIMEOUT,
                     maxBytes != null ? maxBytes : DEFAULT_MAX_BYTES);
         }
@@ -153,6 +173,12 @@ public final class ExportToNgffTool {
      * @param timepointsPerSeries timepoints per series in output
      * @param totalPlanesWritten  total planes across all series
      * @param codec               codec used
+     * @param shardPlanesPerSeries  the Z-planes-per-shard actually chosen for
+     *                    each exported series (in export order; min 1, max the
+     *                    series' planes-per-volume).  Always reported, whether
+     *                    sizing was automatic or driven by
+     *                    {@code suggested_planes_per_shard}, so the caller can
+     *                    see exactly how the data was laid out on disk.
      * @param sourceFormat        source format name
      * @param omeXmlPresent       whether OME-XML was available from the reader
      * @param warnings            warnings about metadata or format conversion
@@ -167,12 +193,14 @@ public final class ExportToNgffTool {
             long totalPlanesWritten,
             Codec codec,
             Integer compressionLevel,
+            int[] shardPlanesPerSeries,
             String sourceFormat,
             boolean omeXmlPresent,
             List<String> warnings) {
 
         public NgffResult {
             warnings = List.copyOf(warnings);
+            shardPlanesPerSeries = shardPlanesPerSeries.clone();
         }
     }
 
@@ -292,6 +320,9 @@ public final class ExportToNgffTool {
                 int planeLen = (int) bytesPerPlane;
 
                 var writer = writerFactory.get();
+                if (request.suggestedPlanesPerShard() != null) {
+                    writer.suggestShardPlanes(request.suggestedPlanesPerShard());
+                }
                 // Open is the one phase where we must NOT delete on failure: an
                 // "already exists" refusal means the path is the user's, not a
                 // partial store we created.
@@ -301,6 +332,19 @@ public final class ExportToNgffTool {
                     closeQuietly(writer);
                     throw e;
                 }
+
+                // The writer has now chosen each series' shard depth: from the
+                // byte heuristic (which the file-count cap may coarsen) or from
+                // our suggestion (which overrides that cap, with a warning).
+                // Capture it so the caller always learns the actual on-disk
+                // layout — not merely what was requested.
+                int[] shardPlanes = new int[seriesToExport.length];
+                for (int i = 0; i < seriesToExport.length; i++) {
+                    shardPlanes[i] = writer.preferredBlockDepth(i);
+                }
+                // Surface any layout warnings (e.g. a suggestion that overrode
+                // the file-count cap) so the caller sees the cost of the choice.
+                warnings.addAll(writer.layoutWarnings());
 
                 // From here on we own the store, so any failure cleans it up.
                 var firstError = new java.util.concurrent.atomic.AtomicReference<Throwable>();
@@ -378,6 +422,7 @@ public final class ExportToNgffTool {
                         planesWritten.get(),
                         request.codec(),
                         request.compressionLevel(),
+                        shardPlanes,
                         formatName,
                         omeXmlPresent,
                         warnings);
