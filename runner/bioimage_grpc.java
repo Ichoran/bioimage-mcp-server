@@ -30,7 +30,7 @@
 
 //JAVA 21
 //REPOS mavencentral,ome=https://artifacts.openmicroscopy.org/artifactory/maven/,unidata=https://artifacts.unidata.ucar.edu/all/
-//DEPS com.github.ichoran:bioimage_mcp_server:[0.3,0.4)
+//DEPS com.github.ichoran:bioimage_mcp_server:0.3.0
 //DEPS com.fasterxml.jackson.core:jackson-annotations:2.20
 
 import lab.kerrr.mcpbio.bioimageserver.BioImageGrpcService;
