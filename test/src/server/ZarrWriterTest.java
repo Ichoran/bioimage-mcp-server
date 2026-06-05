@@ -180,6 +180,46 @@ class ZarrWriterTest {
         assertTrue(arr.contains("\"clevel\":7"), arr);
     }
 
+    // ---- sharding policy ----
+
+    @Test
+    void shardPolicyKeepsLargePlanesPerFile() {
+        // plane already > 1 MB → one plane per file (shardZ = 1)
+        int[] s = ZarrWriter.computeShardDepths(
+                new long[]{2L << 20}, new int[]{100}, new long[]{1},
+                ZarrWriter.MAX_FILES);
+        assertEquals(1, s[0]);
+    }
+
+    @Test
+    void shardPolicyWholeSmallVolume() {
+        // 10 planes × 100 KB ≈ 1 MB volume (< 4 MB) → whole volume in one shard
+        int[] s = ZarrWriter.computeShardDepths(
+                new long[]{100 * 1024}, new int[]{10}, new long[]{1},
+                ZarrWriter.MAX_FILES);
+        assertEquals(10, s[0]);
+    }
+
+    @Test
+    void shardPolicyPowerOfTwoBlock() {
+        // 200 planes × 100 KB = ~20 MB volume → shard = 16 planes (8×100KB<1MB≤16×)
+        int[] s = ZarrWriter.computeShardDepths(
+                new long[]{100 * 1024}, new int[]{200}, new long[]{1},
+                ZarrWriter.MAX_FILES);
+        assertEquals(16, s[0]);
+    }
+
+    @Test
+    void shardPolicyHonorsFileCap() {
+        // 200 Z × 100k (t·c) volumes would be millions of files at shardZ=16;
+        // the cap coarsens shards up to whole volumes (200) to drop under 128k.
+        int[] s = ZarrWriter.computeShardDepths(
+                new long[]{100 * 1024}, new int[]{200}, new long[]{100_000},
+                ZarrWriter.MAX_FILES);
+        assertEquals(200, s[0]);
+        assertTrue((long) 100_000 * ((200 + s[0] - 1) / s[0]) <= ZarrWriter.MAX_FILES);
+    }
+
     @Test
     void indexOnlyWriteUnsupported(@TempDir Path dir) throws Exception {
         try (var w = new ZarrWriter()) {

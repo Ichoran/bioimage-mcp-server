@@ -92,6 +92,56 @@ public interface ImageWriter extends AutoCloseable {
     }
 
     /**
+     * Hint: how many consecutive Z-planes the caller should batch into a
+     * single {@link #writeBlock} for this series.
+     *
+     * <p>For a plane-addressed writer (OME-TIFF) the answer is 1.  A writer
+     * that bundles planes into a larger storage unit (e.g. an OME-Zarr shard)
+     * returns that unit's Z-depth so the caller hands it whole units and the
+     * writer never has to read-modify-write a partially-filled unit.
+     *
+     * @param series zero-based output series index
+     */
+    default int preferredBlockDepth(int series) {
+        return 1;
+    }
+
+    /**
+     * Write a contiguous block of {@code blockZ} Z-planes for one
+     * channel/timepoint of the current series.
+     *
+     * <p>{@code data} holds {@code blockZ} planes back to back in Z order,
+     * each {@code data.length / blockZ} bytes (same per-plane format as
+     * {@link #writePlane}).  The {@code c}/{@code zStart}/{@code t} indices are
+     * <b>output-relative</b>.  This is the unit a parallel exporter hands off:
+     * distinct blocks address disjoint storage, so they may be written
+     * concurrently.
+     *
+     * <p>The default implementation splits the block into planes and calls
+     * {@link #writePlane(int, int, int, int, byte[])}, which is correct for
+     * plane-addressed writers.  A block-addressed writer (OME-Zarr) overrides
+     * this to store the whole block in one operation.
+     *
+     * @param planeIndex flat index of the first plane (for plane-addressed
+     *                   writers; block-addressed writers may ignore it)
+     * @param c          output-relative channel index
+     * @param zStart     output-relative Z index of the first plane
+     * @param t          output-relative timepoint index
+     * @param blockZ     number of planes in {@code data}
+     * @param data       {@code blockZ} planes, Z-contiguous
+     * @throws IOException if the data cannot be written
+     */
+    default void writeBlock(int planeIndex, int c, int zStart, int t,
+                            int blockZ, byte[] data) throws IOException {
+        int planeLen = data.length / blockZ;
+        for (int k = 0; k < blockZ; k++) {
+            byte[] plane = new byte[planeLen];
+            System.arraycopy(data, k * planeLen, plane, 0, planeLen);
+            writePlane(planeIndex + k, c, zStart + k, t, plane);
+        }
+    }
+
+    /**
      * Returns the total number of bytes written to the output file
      * so far.  This is an approximation — it may not account for
      * headers or compression overhead precisely.

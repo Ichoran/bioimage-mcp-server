@@ -60,15 +60,22 @@ import java.util.stream.Stream;
  */
 public final class ZarrWriter implements ImageWriter {
 
-    /** One exported series: its open array plus what writePlane needs. */
+    /** ~1 MB: the block size where per-item allocation/IO overhead flattens. */
+    static final long TARGET_SHARD_BYTES = 1L << 20;
+    /** Volumes smaller than this go in a single shard (one file per t,c). */
+    static final long SMALL_VOLUME_BYTES = 1L << 22;   // 4 MB
+    /** Cap on chunk files; we coarsen shards (up to whole volumes) to stay under. */
+    static final int MAX_FILES = 128 * 1024;
+
+    /** One exported series: its open array plus what writeBlock needs. */
     private record SeriesArray(
-            Array array, int sizeY, int sizeX,
+            Array array, int sizeY, int sizeX, int sizeZ, int shardZ,
             ucar.ma2.DataType ma2Type, int bytesPerSample, ByteOrder order) {}
 
     private Path root;
     private String codec;
     private final List<SeriesArray> series = new ArrayList<>();
-    private int current = -1;
+    private volatile int current = -1;
 
     @Override
     public void open(Path path, String omeXml, String compression)
@@ -107,8 +114,24 @@ public final class ZarrWriter implements ImageWriter {
                 throw new IOException(
                         "OME-XML contains no Image/Pixels elements");
             }
-            for (int s = 0; s < images.size(); s++) {
-                series.add(createSeries(store, s, images.get(s)));
+
+            // Compute the shard depth (Z-planes per file) for every series up
+            // front, so the global file-count cap can see all series together.
+            int n = images.size();
+            long[] planeBytes = new long[n];
+            int[] sizeZ = new int[n];
+            long[] tc = new long[n];
+            for (int s = 0; s < n; s++) {
+                Element px = images.get(s);
+                planeBytes[s] = (long) intAttr(px, "SizeX") * intAttr(px, "SizeY")
+                        * mapDataType(px.getAttribute("Type")).getByteCount();
+                sizeZ[s] = intAttr(px, "SizeZ");
+                tc[s] = (long) intAttr(px, "SizeT") * intAttr(px, "SizeC");
+            }
+            int[] shardZ = computeShardDepths(planeBytes, sizeZ, tc, MAX_FILES);
+
+            for (int s = 0; s < n; s++) {
+                series.add(createSeries(store, s, images.get(s), shardZ[s]));
             }
         } catch (IOException e) {
             throw e;
@@ -119,8 +142,8 @@ public final class ZarrWriter implements ImageWriter {
     }
 
     /** Build one series' image group + resolution-level array. */
-    private SeriesArray createSeries(FilesystemStore store, int s, Element pixels)
-            throws Exception {
+    private SeriesArray createSeries(FilesystemStore store, int s, Element pixels,
+                                     int shardZ) throws Exception {
         int sizeX = intAttr(pixels, "SizeX");
         int sizeY = intAttr(pixels, "SizeY");
         int sizeZ = intAttr(pixels, "SizeZ");
@@ -144,23 +167,88 @@ public final class ZarrWriter implements ImageWriter {
         StoreHandle imageHandle = store.resolve(String.valueOf(s));
         dev.zarr.zarrjava.v3.Group.create(imageHandle, imageAttrs);
 
-        // The single resolution-level array, chunked one plane deep with XY
-        // tiling so reads/writes stay bounded for large planes.
-        int chunkY = Math.min(sizeY, 1024);
-        int chunkX = Math.min(sizeX, 1024);
-        var meta = Array.metadataBuilder()
+        // The single resolution-level array.  The inner chunk is always one
+        // whole plane (ideal for plane-based microscopy reads — exactly one
+        // plane decompressed per access).  When shardZ > 1 we bundle shardZ
+        // plane-chunks into one shard file, so the file count stays sane for
+        // volumetric/timeseries data without changing the read granularity.
+        var b = Array.metadataBuilder()
                 .withShape(sizeT, sizeC, sizeZ, sizeY, sizeX)
                 .withDataType(dataType)
-                .withChunkShape(1, 1, 1, chunkY, chunkX)
                 .withFillValue(0)
-                .withDimensionNames("t", "c", "z", "y", "x")
-                .withCodecs(this::codecs)
-                .build();
-        Array array = Array.create(store.resolve(String.valueOf(s), "0"), meta);
+                .withDimensionNames("t", "c", "z", "y", "x");
+        if (shardZ > 1) {
+            b = b.withChunkShape(1, 1, shardZ, sizeY, sizeX)   // shard = file
+                 .withCodecs(cb -> cb.withSharding(
+                         new int[]{1, 1, 1, sizeY, sizeX},      // inner = plane
+                         this::applyInnerCodec));
+        } else {
+            b = b.withChunkShape(1, 1, 1, sizeY, sizeX)
+                 .withCodecs(this::applyInnerCodec);
+        }
+        Array array = Array.create(store.resolve(String.valueOf(s), "0"), b.build());
 
         return new SeriesArray(
-                array, sizeY, sizeX, dataType.getMA2DataType(),
+                array, sizeY, sizeX, sizeZ, shardZ, dataType.getMA2DataType(),
                 bytesPerSample, order);
+    }
+
+    // ================================================================
+    // Sharding policy (file count vs. write-buffer size) — see PLAN Phase 16.
+    // ================================================================
+
+    /**
+     * Choose the shard depth (Z-planes per file) for each series.
+     *
+     * <p>Per series: a plane already over the ~1 MB sweet spot stays one file
+     * per plane; a volume under 4 MB goes in a single file; otherwise shardZ is
+     * the smallest power of two whose block reaches ~1 MB.  Then, globally, if
+     * the total chunk-file count would exceed {@code maxFiles}, shard depths are
+     * doubled (never past a whole volume) until the count drops under the cap.
+     */
+    static int[] computeShardDepths(long[] planeBytes, int[] sizeZ,
+                                    long[] tc, int maxFiles) {
+        int n = planeBytes.length;
+        int[] shardZ = new int[n];
+        for (int i = 0; i < n; i++) {
+            long pb = planeBytes[i];
+            int z = sizeZ[i];
+            if (pb > TARGET_SHARD_BYTES) {
+                shardZ[i] = 1;
+            } else if ((long) z * pb < SMALL_VOLUME_BYTES) {
+                shardZ[i] = z;
+            } else {
+                int s = 1;
+                while ((long) s * pb < TARGET_SHARD_BYTES && s < z) s <<= 1;
+                shardZ[i] = Math.min(s, z);
+            }
+            if (shardZ[i] < 1) shardZ[i] = 1;
+        }
+        while (totalFiles(shardZ, sizeZ, tc) > maxFiles && canGrow(shardZ, sizeZ)) {
+            for (int i = 0; i < n; i++) {
+                if (shardZ[i] < sizeZ[i]) {
+                    shardZ[i] = Math.min(sizeZ[i], shardZ[i] * 2);
+                }
+            }
+        }
+        return shardZ;
+    }
+
+    private static long totalFiles(int[] shardZ, int[] sizeZ, long[] tc) {
+        long files = 0;
+        for (int i = 0; i < shardZ.length; i++) {
+            int sz = Math.max(1, shardZ[i]);
+            long blocks = (sizeZ[i] + sz - 1L) / sz;   // ceil(Z / shardZ)
+            files += tc[i] * blocks;
+        }
+        return files;
+    }
+
+    private static boolean canGrow(int[] shardZ, int[] sizeZ) {
+        for (int i = 0; i < shardZ.length; i++) {
+            if (shardZ[i] < sizeZ[i]) return true;
+        }
+        return false;
     }
 
     @Override
@@ -187,27 +275,52 @@ public final class ZarrWriter implements ImageWriter {
     @Override
     public void writePlane(int planeIndex, int c, int z, int t, byte[] data)
             throws IOException {
+        writeBlock(planeIndex, c, z, t, 1, data);
+    }
+
+    @Override
+    public int preferredBlockDepth(int s) {
+        return (s >= 0 && s < series.size()) ? series.get(s).shardZ() : 1;
+    }
+
+    /**
+     * Write {@code blockZ} contiguous Z-planes (one channel/timepoint) in a
+     * single operation.  Safe to call concurrently for distinct blocks: each
+     * block addresses a disjoint region, and a block aligned to the shard grid
+     * maps to one shard file (verified by ZarrConcurrencyTest).  The current
+     * series must stay fixed while concurrent blocks for it are in flight.
+     */
+    @Override
+    public void writeBlock(int planeIndex, int c, int zStart, int t,
+                           int blockZ, byte[] data) throws IOException {
         if (current < 0) {
             throw new IllegalStateException("setSeries not called");
         }
         SeriesArray sa = series.get(current);
-        long expected = (long) sa.sizeY * sa.sizeX * sa.bytesPerSample;
+        long expected = (long) blockZ * sa.sizeY * sa.sizeX * sa.bytesPerSample;
         if (data.length != expected) {
-            throw new IOException("plane byte count " + data.length
-                    + " does not match expected " + expected
-                    + " for a " + sa.sizeX + "x" + sa.sizeY + " plane");
+            throw new IOException("block byte count " + data.length
+                    + " does not match expected " + expected + " (" + blockZ
+                    + " planes of " + sa.sizeX + "x" + sa.sizeY + ")");
         }
         // Wrap the raw bytes (read in the source's byte order) as a typed
-        // ma2 array; zarr-java re-encodes to the array's on-disk codec.
+        // ma2 array; zarr-java re-encodes to the array's on-disk codec and,
+        // when sharded, packs the plane-chunks into the shard file.
         ByteBuffer buf = ByteBuffer.wrap(data).order(sa.order);
-        var plane = ucar.ma2.Array.factory(
-                sa.ma2Type, new int[]{1, 1, 1, sa.sizeY, sa.sizeX}, buf);
+        var block = ucar.ma2.Array.factory(
+                sa.ma2Type, new int[]{1, 1, blockZ, sa.sizeY, sa.sizeX}, buf);
         try {
-            sa.array.write(new long[]{t, c, z, 0, 0}, plane);
+            sa.array.write(new long[]{t, c, zStart, 0, 0}, block);
         } catch (RuntimeException e) {
-            throw new IOException("Failed to write plane (c=" + c + " z=" + z
-                    + " t=" + t + "): " + e.getMessage(), e);
+            throw new IOException("Failed to write block (c=" + c + " zStart="
+                    + zStart + " t=" + t + " blockZ=" + blockZ + "): "
+                    + e.getMessage(), e);
         }
+    }
+
+    /** The store root, for cleanup of a partial store after a failed export. */
+    public Path outputRoot() {
+        return root;
     }
 
     @Override
@@ -226,8 +339,8 @@ public final class ZarrWriter implements ImageWriter {
 
     @Override
     public void close() {
-        // zarr-java flushes each chunk on write(); nothing to finalize for a
-        // single-level, unsharded store.
+        // Each writeBlock writes its chunk/shard in full on the spot, so there
+        // is nothing to flush or finalize at close for a single-level store.
     }
 
     // ================================================================
@@ -252,9 +365,10 @@ public final class ZarrWriter implements ImageWriter {
      * out-of-range level as INVALID_ARGUMENT); this method applies the value
      * and lets zarr-java reject anything the tool let through.
      */
-    private dev.zarr.zarrjava.v3.codec.CodecBuilder codecs(
+    private dev.zarr.zarrjava.v3.codec.CodecBuilder applyInnerCodec(
             dev.zarr.zarrjava.v3.codec.CodecBuilder cb) {
         // On-disk endianness is fixed little (independent of source order).
+        // When sharded, this is the per-inner-chunk (per-plane) pipeline.
         cb = cb.withBytes("LITTLE");
         String name = codec;
         Integer level = null;

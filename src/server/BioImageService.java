@@ -74,6 +74,15 @@ public final class BioImageService {
     private final Supplier<ImageWriter> zarrWriterFactory;
 
     /**
+     * Server-wide cap on OME-Zarr writer threads (from {@code --parallelism}).
+     * The pool is shared across all clients/transports, so total compression
+     * never exceeds this regardless of client count.  Set before the first
+     * export; the pool is sized once, lazily.
+     */
+    private volatile int parallelism;
+    private volatile BlockPool blockPool;
+
+    /**
      * Open sessions, keyed by handle.  Populated by {@link #openSession} and
      * drained by {@link #closeSession} (driven by a session-capable transport
      * when the client closes a handle or the connection drops).  Stateless
@@ -85,13 +94,64 @@ public final class BioImageService {
     private BioImageService(List<Path> denyList, List<Path> allowList,
                             Supplier<ImageReader> readerFactory,
                             Supplier<ImageWriter> writerFactory,
-                            Supplier<ImageWriter> zarrWriterFactory) {
+                            Supplier<ImageWriter> zarrWriterFactory,
+                            int parallelism) {
         this.denyList = List.copyOf(denyList);
         this.allowList = List.copyOf(allowList);
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
         this.zarrWriterFactory = zarrWriterFactory;
+        this.parallelism = parallelism;
         rebuildAccessControl();
+    }
+
+    /** Default worker count: ~1/3 of the (cgroup-aware) available cores. */
+    static int defaultParallelism() {
+        return resolveParallelism("0.334",
+                Runtime.getRuntime().availableProcessors());
+    }
+
+    /**
+     * Resolve a {@code --parallelism} spec to a thread count: an integer is the
+     * count directly; a decimal is that fraction of {@code cores}, rounded up
+     * (so {@code 0.334} on 12 cores → 5).  Result is at least 1.
+     */
+    static int resolveParallelism(String spec, int cores) {
+        String s = spec.trim();
+        if (s.indexOf('.') >= 0) {
+            double f = Double.parseDouble(s);
+            if (f <= 0) {
+                throw new IllegalArgumentException(
+                        "parallelism fraction must be > 0: " + spec);
+            }
+            return Math.max(1, (int) Math.ceil(f * cores));
+        }
+        int n = Integer.parseInt(s);
+        if (n < 1) {
+            throw new IllegalArgumentException(
+                    "parallelism must be >= 1: " + spec);
+        }
+        return n;
+    }
+
+    /** The resolved server-wide writer-thread count. */
+    public int parallelism() {
+        return parallelism;
+    }
+
+    /** The shared writer pool, created lazily and sized to {@link #parallelism}. */
+    private BlockPool blockPool() {
+        BlockPool p = blockPool;
+        if (p == null) {
+            synchronized (this) {
+                p = blockPool;
+                if (p == null) {
+                    p = new BlockPool(parallelism);
+                    blockPool = p;
+                }
+            }
+        }
+        return p;
     }
 
     // ================================================================
@@ -108,6 +168,7 @@ public final class BioImageService {
         private Supplier<ImageReader> readerFactory = BioFormatsReader::new;
         private Supplier<ImageWriter> writerFactory = BioFormatsWriter::new;
         private Supplier<ImageWriter> zarrWriterFactory = ZarrWriter::new;
+        private int parallelism = defaultParallelism();
 
         /** Add a path that the server is explicitly allowed to access. */
         public Builder allow(String path) {
@@ -143,9 +204,15 @@ public final class BioImageService {
             return this;
         }
 
+        /** Server-wide OME-Zarr writer-thread count (see {@code --parallelism}). */
+        public Builder parallelism(int parallelism) {
+            this.parallelism = Math.max(1, parallelism);
+            return this;
+        }
+
         public BioImageService build() {
             return new BioImageService(denyList, allowList,
-                    readerFactory, writerFactory, zarrWriterFactory);
+                    readerFactory, writerFactory, zarrWriterFactory, parallelism);
         }
     }
 
@@ -170,6 +237,13 @@ public final class BioImageService {
                 .hasArg()
                 .desc("Deny access to this path (may be repeated)")
                 .build());
+        options.addOption(Option.builder()
+                .longOpt("parallelism")
+                .hasArg()
+                .desc("OME-Zarr writer threads: an integer count, or a decimal "
+                        + "fraction of available cores (default 0.334). "
+                        + "Server-wide, shared across all clients.")
+                .build());
         return options;
     }
 
@@ -183,6 +257,16 @@ public final class BioImageService {
     public void applyCliArgs(String[] args) throws ParseException {
         var cli = new DefaultParser().parse(accessControlOptions(), args);
         applyAllowDeny(cli.getOptionValues("allow"), cli.getOptionValues("deny"));
+        String par = cli.getOptionValue("parallelism");
+        if (par != null) {
+            try {
+                this.parallelism = resolveParallelism(
+                        par, Runtime.getRuntime().availableProcessors());
+            } catch (IllegalArgumentException e) {
+                throw new ParseException(
+                        "invalid --parallelism: " + e.getMessage());
+            }
+        }
     }
 
     /**
@@ -593,7 +677,7 @@ public final class BioImageService {
                     optLong(args, "max_bytes"));
             return ExportToNgffTool.execute(
                     request, pathValidator(), outputPathValidator(),
-                    readerFactory, zarrWriterFactory);
+                    readerFactory, zarrWriterFactory, blockPool());
         } catch (IllegalArgumentException e) {
             return ToolResult.invalidArgument(e.getMessage());
         }

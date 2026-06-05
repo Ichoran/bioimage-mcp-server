@@ -181,9 +181,10 @@ public final class ExportToNgffTool {
             Request request,
             PathValidator pathValidator,
             Supplier<ImageReader> readerFactory,
-            Supplier<ImageWriter> writerFactory) {
+            Supplier<ImageWriter> writerFactory,
+            BlockPool pool) {
         return execute(request, pathValidator, pathValidator,
-                readerFactory, writerFactory);
+                readerFactory, writerFactory, pool);
     }
 
     public static ToolResult<NgffResult> execute(
@@ -191,7 +192,8 @@ public final class ExportToNgffTool {
             PathValidator inputPathValidator,
             PathValidator outputPathValidator,
             Supplier<ImageReader> readerFactory,
-            Supplier<ImageWriter> writerFactory) {
+            Supplier<ImageWriter> writerFactory,
+            BlockPool pool) {
 
         var inputAccess = inputPathValidator.check(request.inputPath());
         if (inputAccess instanceof AccessResult.Denied denied) {
@@ -287,46 +289,117 @@ public final class ExportToNgffTool {
                         + (request.compressionLevel() != null
                             ? ":" + request.compressionLevel() : "");
 
-                try (var writer = writerFactory.get()) {
-                    writer.open(outputPath, omeXml, codecSpec);
+                int planeLen = (int) bytesPerPlane;
 
-                    long planesWritten = 0;
+                var writer = writerFactory.get();
+                // Open is the one phase where we must NOT delete on failure: an
+                // "already exists" refusal means the path is the user's, not a
+                // partial store we created.
+                try {
+                    writer.open(outputPath, omeXml, codecSpec);
+                } catch (Exception e) {
+                    closeQuietly(writer);
+                    throw e;
+                }
+
+                // From here on we own the store, so any failure cleans it up.
+                var firstError = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+                var planesWritten = new java.util.concurrent.atomic.AtomicLong();
+                try {
                     for (int seriesIdx = 0;
                          seriesIdx < seriesToExport.length; seriesIdx++) {
                         int s = seriesToExport[seriesIdx];
                         writer.setSeries(seriesIdx);
-                        int planeIdx = 0;
+                        // Hand off whole shard blocks; distinct blocks address
+                        // disjoint shard files, so workers never collide.
+                        int blockZ = Math.max(1, writer.preferredBlockDepth(seriesIdx));
+                        var futures = new ArrayList<java.util.concurrent.Future<?>>();
+
+                        readLoop:
                         for (int ti = 0; ti < tCount; ti++) {
                             int t = tStart + ti;
-                            for (int zi = 0; zi < zCount; zi++) {
-                                int z = zStart + zi;
-                                for (int ci = 0; ci < channels.length; ci++) {
-                                    byte[] data = reader.readPlane(
-                                            s, channels[ci], z, t);
-                                    writer.writePlane(
-                                            planeIdx++, ci, zi, ti, data);
-                                    planesWritten++;
+                            for (int ci = 0; ci < channels.length; ci++) {
+                                int ch = channels[ci];
+                                for (int zb = 0; zb < zCount; zb += blockZ) {
+                                    if (firstError.get() != null) break readLoop;
+                                    int bz = Math.min(blockZ, zCount - zb);
+                                    byte[] block = new byte[bz * planeLen];
+                                    for (int k = 0; k < bz; k++) {
+                                        byte[] p = reader.readPlane(
+                                                s, ch, zStart + zb + k, t);
+                                        if (p.length != planeLen) {
+                                            throw new java.io.IOException(
+                                                "plane size " + p.length
+                                                + " != expected " + planeLen);
+                                        }
+                                        System.arraycopy(
+                                                p, 0, block, k * planeLen, planeLen);
+                                    }
+                                    final int fc = ci, fzb = zb, ft = ti, fbz = bz;
+                                    futures.add(pool.submit(() -> {
+                                        if (firstError.get() != null) return;
+                                        try {
+                                            writer.writeBlock(0, fc, fzb, ft, fbz, block);
+                                            planesWritten.addAndGet(fbz);
+                                        } catch (Throwable th) {
+                                            firstError.compareAndSet(null, th);
+                                        }
+                                    }));
                                 }
                             }
                         }
+                        // Barrier: all of this series' shard writes must finish
+                        // before setSeries re-points the writer for the next.
+                        BlockPool.awaitAll(futures);
+                        if (firstError.get() != null) break;
                     }
-
-                    return new NgffResult(
-                            outputPath.toString(),
-                            writer.getBytesWritten(),
-                            seriesToExport.length,
-                            channels.length, zCount, tCount,
-                            planesWritten,
-                            request.codec(),
-                            request.compressionLevel(),
-                            formatName,
-                            omeXmlPresent,
-                            warnings);
+                } catch (Throwable th) {
+                    firstError.compareAndSet(null, th);
                 }
+
+                if (firstError.get() != null) {
+                    // We created this store and it is incomplete — remove it so
+                    // it can never be mistaken for a valid export, then fail.
+                    closeQuietly(writer);
+                    deleteRecursively(outputPath);
+                    Throwable err = firstError.get();
+                    throw new java.io.IOException(
+                            "OME-Zarr export failed and the partial store was "
+                            + "removed: " + err.getMessage(), err);
+                }
+
+                long bytesWritten = writer.getBytesWritten();
+                closeQuietly(writer);
+                return new NgffResult(
+                        outputPath.toString(),
+                        bytesWritten,
+                        seriesToExport.length,
+                        channels.length, zCount, tCount,
+                        planesWritten.get(),
+                        request.codec(),
+                        request.compressionLevel(),
+                        formatName,
+                        omeXmlPresent,
+                        warnings);
             }
         });
 
         return ToolResult.unwrap(result);
+    }
+
+    private static void closeQuietly(ImageWriter writer) {
+        try { writer.close(); } catch (Exception ignored) { }
+    }
+
+    /** Recursively delete a partial store; best-effort. */
+    private static void deleteRecursively(java.nio.file.Path root) {
+        if (root == null || !java.nio.file.Files.exists(root)) return;
+        try (var walk = java.nio.file.Files.walk(root)) {
+            walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                try { java.nio.file.Files.deleteIfExists(p); }
+                catch (java.io.IOException ignored) { }
+            });
+        } catch (java.io.IOException ignored) { }
     }
 
     /**

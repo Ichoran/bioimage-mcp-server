@@ -8,9 +8,11 @@ import lab.kerrr.mcpbio.bioimageserver.ToolResult.ErrorKind;
 
 import dev.zarr.zarrjava.v3.Array;
 
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -24,6 +26,14 @@ class ExportToNgffToolTest {
     static final Duration TIMEOUT = Duration.ofSeconds(10);
     static final long MAX_BYTES = 256L * 1024 * 1024;
     static final int SX = 16, SY = 16;
+
+    /** Shared writer pool for the test class (mirrors the server-wide pool). */
+    static final BlockPool POOL = new BlockPool(4);
+
+    @AfterAll
+    static void closePool() {
+        POOL.close();
+    }
 
     /** FakeImageReader's deterministic value for a uint16 source. */
     private static int rawValue(int x, int y, int c, int z, int t) {
@@ -50,7 +60,7 @@ class ExportToNgffToolTest {
                 "/input.tif", out.toString(), null,
                 channels, z, t, codec, level, TIMEOUT, MAX_BYTES);
         var result = ExportToNgffTool.execute(
-                request, PathValidator.allowAll(), rf, ZarrWriter::new);
+                request, PathValidator.allowAll(), rf, ZarrWriter::new, POOL);
         if (result instanceof ToolResult.Failure<NgffResult> f) {
             fail("expected success, got " + f.kind() + ": " + f.message());
         }
@@ -156,7 +166,7 @@ class ExportToNgffToolTest {
                 Slice.all(), Slice.all(), Slice.all(),
                 Codec.NONE, null, TIMEOUT, MAX_BYTES);
         var result = ExportToNgffTool.execute(
-                request, PathValidator.allowAll(), reader(1, 1, 1), ZarrWriter::new);
+                request, PathValidator.allowAll(), reader(1, 1, 1), ZarrWriter::new, POOL);
         assertInstanceOf(ToolResult.Failure.class, result);
         assertEquals(ErrorKind.IO_ERROR,
                 ((ToolResult.Failure<NgffResult>) result).kind());
@@ -173,7 +183,7 @@ class ExportToNgffToolTest {
                 Slice.all(), Slice.all(), Slice.all(),
                 Codec.NONE, null, TIMEOUT, MAX_BYTES);
         var result = ExportToNgffTool.execute(
-                request, selective, selective, reader(1, 1, 1), ZarrWriter::new);
+                request, selective, selective, reader(1, 1, 1), ZarrWriter::new, POOL);
         assertInstanceOf(ToolResult.Failure.class, result);
         var f = (ToolResult.Failure<NgffResult>) result;
         assertEquals(ErrorKind.ACCESS_DENIED, f.kind());
@@ -188,7 +198,7 @@ class ExportToNgffToolTest {
                 Slice.all(), Slice.all(), Slice.all(),
                 Codec.NONE, null, TIMEOUT, 1000);
         var result = ExportToNgffTool.execute(
-                request, PathValidator.allowAll(), reader(2, 2, 2), ZarrWriter::new);
+                request, PathValidator.allowAll(), reader(2, 2, 2), ZarrWriter::new, POOL);
         assertInstanceOf(ToolResult.Failure.class, result);
         var f = (ToolResult.Failure<NgffResult>) result;
         assertEquals(ErrorKind.INVALID_ARGUMENT, f.kind());
@@ -269,5 +279,43 @@ class ExportToNgffToolTest {
                         Slice.all(), Slice.all(), Slice.all(),
                         Codec.NONE, 5, TIMEOUT, MAX_BYTES));
         assertTrue(ex.getMessage().contains("not applicable"), ex.getMessage());
+    }
+
+    // ---- error isolation: a write failure fails the op AND deletes the store ----
+
+    /** Wraps a real ZarrWriter (so the store gets created) but fails on write. */
+    private static final class FailingWriter implements ImageWriter {
+        private final ZarrWriter delegate = new ZarrWriter();
+        public void open(Path p, String xml, String c) throws IOException {
+            delegate.open(p, xml, c);   // creates the store on disk
+        }
+        public void setSeries(int s) throws IOException { delegate.setSeries(s); }
+        public int preferredBlockDepth(int s) { return delegate.preferredBlockDepth(s); }
+        public void writePlane(int i, byte[] d) throws IOException {
+            throw new IOException("simulated write failure");
+        }
+        public void writeBlock(int i, int c, int z, int t, int bz, byte[] d)
+                throws IOException {
+            throw new IOException("simulated write failure");
+        }
+        public long getBytesWritten() { return delegate.getBytesWritten(); }
+        public void close() throws IOException { delegate.close(); }
+    }
+
+    @Test
+    void writeErrorFailsOpAndDeletesPartialStore(@TempDir Path dir) {
+        Path store = dir.resolve("out.zarr");
+        var request = ExportToNgffTool.Request.of(
+                "/input.tif", store.toString(), null,
+                Slice.all(), Slice.all(), Slice.all(),
+                Codec.NONE, null, TIMEOUT, MAX_BYTES);
+        var result = ExportToNgffTool.execute(
+                request, PathValidator.allowAll(),
+                reader(2, 2, 2), FailingWriter::new, POOL);
+        assertInstanceOf(ToolResult.Failure.class, result);
+        var f = (ToolResult.Failure<NgffResult>) result;
+        assertEquals(ErrorKind.IO_ERROR, f.kind());
+        // No partial store left behind to masquerade as valid data.
+        assertFalse(Files.exists(store), "partial store must be deleted");
     }
 }

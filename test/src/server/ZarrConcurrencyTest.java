@@ -16,11 +16,14 @@ import java.util.concurrent.Future;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * Spike: verifies that many disjoint {@code (t,c,z)} planes can be written to a
- * single {@link ZarrWriter} array <b>concurrently</b> and still round-trip
- * byte-exact.  This is the safety precondition for a parallel export pool — if
- * zarr-java's {@code Array.write} were unsafe for concurrent disjoint chunks,
- * the parallel design would need a lock around the store write instead.
+ * Verifies that many disjoint <b>blocks</b> (the unit the parallel exporter
+ * hands off — each a whole shard / Z-stack) can be written to a single
+ * {@link ZarrWriter} array <b>concurrently</b> and still round-trip byte-exact.
+ *
+ * <p>This mirrors the real parallel write pattern: distinct {@code (t,c)}
+ * blocks map to distinct shard files, so concurrent writes never touch the same
+ * file.  (Writing individual <i>planes</i> of the same shard concurrently would
+ * be unsafe — which is exactly why the exporter's unit of work is a block.)
  */
 class ZarrConcurrencyTest {
 
@@ -41,16 +44,19 @@ class ZarrConcurrencyTest {
             + "</Pixels></Image></OME>");
     }
 
-    private static byte[] plane(int c, int z, int t) {
-        ByteBuffer buf = ByteBuffer.allocate(Y * X * 2).order(ByteOrder.LITTLE_ENDIAN);
-        for (int y = 0; y < Y; y++)
-            for (int x = 0; x < X; x++)
-                buf.putShort((short) value(c, z, t, y, x));
+    /** A whole (t,c) Z-stack block: Z planes, Z-contiguous, row-major. */
+    private static byte[] block(int c, int t) {
+        ByteBuffer buf = ByteBuffer.allocate(Z * Y * X * 2)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        for (int z = 0; z < Z; z++)
+            for (int y = 0; y < Y; y++)
+                for (int x = 0; x < X; x++)
+                    buf.putShort((short) value(c, z, t, y, x));
         return buf.array();
     }
 
     @Test
-    void concurrentDisjointPlaneWritesRoundTrip(@TempDir Path dir) throws Exception {
+    void concurrentDisjointBlockWritesRoundTrip(@TempDir Path dir) throws Exception {
         Path store = dir.resolve("out.zarr");
         try (var w = new ZarrWriter()) {
             w.open(store, omeXml(), "zstd");
@@ -59,19 +65,17 @@ class ZarrConcurrencyTest {
             int threads = Math.max(4, Runtime.getRuntime().availableProcessors());
             try (var pool = Executors.newFixedThreadPool(threads)) {
                 List<Future<?>> futures = new ArrayList<>();
-                int idx = 0;
                 for (int t = 0; t < T; t++) {
-                    for (int z = 0; z < Z; z++) {
-                        for (int c = 0; c < C; c++) {
-                            int fc = c, fz = z, ft = t, fi = idx++;
-                            futures.add(pool.submit(() -> {
-                                try {
-                                    w.writePlane(fi, fc, fz, ft, plane(fc, fz, ft));
-                                } catch (Exception e) {
-                                    throw new RuntimeException(e);
-                                }
-                            }));
-                        }
+                    for (int c = 0; c < C; c++) {
+                        int fc = c, ft = t;
+                        futures.add(pool.submit(() -> {
+                            try {
+                                // Each task writes one whole (t,c) shard.
+                                w.writeBlock(0, fc, 0, ft, Z, block(fc, ft));
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        }));
                     }
                 }
                 for (var f : futures) f.get();  // surface any worker exception

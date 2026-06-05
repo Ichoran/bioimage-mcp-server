@@ -368,9 +368,51 @@ convention, lives at `OME/METADATA.ome.xml`.
 ### Deferred to Phase 15b (not MVP)
 - Multiscale **pyramid** generation (reuse the area-average downsampler from
   the thumbnail code) — needed for big data to be usable in napari/
-  neuroglancer; shard/chunk-size heuristics.
+  neuroglancer.
 - S3 store target; reading `.zarr` back through our `ImageReader`
   (OMEZarrReader add-on or zarr-java directly).
+
+
+## Phase 16: Sharded + parallel OME-Zarr export — DONE
+
+Two coupled improvements to `export_to_ngff`: automatic sharding (so the
+file count stays sane for volumetric/timeseries data) and a shared, capped
+writer pool (so compression actually uses the cores).
+
+- **Automatic sharding (no knobs).** Inner chunk is always **one plane**
+  (ideal for plane-based microscopy reads — exactly one plane decompressed per
+  access, cache-independent).  Sharding bundles plane-chunks into few files
+  *without* changing read granularity.  Per series: plane > 1 MB → one
+  plane/file; volume < 4 MB → whole volume in one shard; else shard = 2^m
+  planes reaching ~1 MB.  Global 128k-file cap doubles shard depth (never past
+  a whole volume) until under.  Nested v3 chunk keys kept (so multi-shard
+  layouts are visible on disk).  `ZarrWriter.computeShardDepths`.
+- **Block-buffered writes.** A shard is written in one `array.write` of a
+  `[1,1,shardZ,Y,X]` block, so zarr-java never read-modify-writes a
+  partially-filled shard.  New `ImageWriter.writeBlock` + `preferredBlockDepth`
+  (defaults: split→writePlane, depth 1 — TIFF unchanged); `ZarrWriter`
+  overrides both.
+- **Shared, server-wide writer pool (`BlockPool`).** Owned by
+  `BioImageService`, sized to `--parallelism`, shared by ALL clients/exports —
+  total concurrent compression is capped regardless of client count.  A reader
+  thread per export assembles whole shards and hands them off; a shared
+  semaphore bounds total in-flight blocks (memory).  No per-export
+  self-processing (it would break the hard total cap); a saturated reader
+  blocks (correct backpressure).
+- **`--parallelism`** (server-wide): integer = thread count, decimal =
+  fraction of cores rounded up; default **0.334** (≈ cores/3 + 1).
+  cgroup-aware via `availableProcessors()`.
+- **Error isolation (no-crash + delete).** First write error cancels only that
+  export's remaining work, drains its in-flight tasks, **deletes the partial
+  store**, and fails only that operation — other clients keep running, JVM
+  stays up.  Success is returned only after every block future completed
+  without error (a dead worker can't masquerade as a finished export).  An
+  "already exists" open refusal never deletes (the path is the user's).
+- **Validated:** 427 unit tests (sharding-policy rules + cap; concurrent
+  disjoint-*block* writes; forced-write-error fails op + deletes store;
+  `--parallelism` resolver + wiring); MCP smoke 10/10.  Live real-CZI:
+  parallelism scales ~1→2→4→8 = 3381→1717→1244→993 ms (byte-identical
+  output), sharding 63 plane-files → 37.
 
 
 ## Already done
