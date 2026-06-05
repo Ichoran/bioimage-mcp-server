@@ -59,7 +59,7 @@ import java.util.concurrent.Executors;
 public final class BioImageHttpService {
 
     static final String NAME = "bioimage-http";
-    static final String VERSION = "0.2.0";
+    static final String VERSION = "0.3.0";
 
     static final int DEFAULT_PORT = 8722;
 

@@ -146,6 +146,22 @@ jbang runner/bioimage_mcp.java --allow /data/microscopy --deny /tmp/secret
 CLI flags are merged with any paths hardcoded in the runner file.
 Deny rules always win.  See DESIGN.md §5 for details.
 
+### Parallelism
+
+`export_to_ngff` (OME-Zarr export) compresses shard blocks on a worker
+pool.  Control its size with `--parallelism`:
+
+```sh
+jbang runner/bioimage_mcp.java --parallelism 8      # 8 writer threads
+jbang runner/bioimage_mcp.java --parallelism 0.5    # half the available cores
+```
+
+An integer is a thread count; a decimal is a fraction of the machine's
+cores (rounded up).  The default is `0.334` (about a third of the cores),
+chosen so a server sharing a machine doesn't assume all CPUs are its own.
+The pool is **server-wide** — total compression is capped regardless of how
+many clients connect.
+
 
 ## Tools
 
@@ -257,7 +273,7 @@ line](https://mill-build.org/mill/cli/installation-ide.html).
 ### Commands
 
 ```sh
-mill test                # run all tests (367 unit + integration)
+mill test                # run all tests (429 unit + integration)
 mill assembly            # build fat jar
 mill run                 # run the server directly via Mill
 mill publishLocal        # publish to ~/.ivy2/local for local testing

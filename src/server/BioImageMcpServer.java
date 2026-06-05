@@ -29,9 +29,9 @@ import java.util.Map;
  * {@link BioImageService}, which is shared with other adapters such as
  * {@link BioImageHttpService}.
  *
- * <p>Registers six tools: {@code inspect_image}, {@code get_ome_metadata},
- * {@code get_thumbnail}, {@code get_plane}, {@code get_intensity_stats}, and
- * {@code export_to_tiff}.
+ * <p>Registers seven tools: {@code inspect_image}, {@code get_ome_metadata},
+ * {@code get_thumbnail}, {@code get_plane}, {@code get_intensity_stats},
+ * {@code export_to_tiff}, and {@code export_to_ngff}.
  *
  * @see BioImageService
  * @see PathAccessControl
@@ -39,7 +39,7 @@ import java.util.Map;
 public class BioImageMcpServer {
 
     static final String NAME = "bioimage-mcp";
-    static final String VERSION = "0.2.0";
+    static final String VERSION = "0.3.0";
 
     /**
      * Server-level instructions shown to the LLM when it discovers
