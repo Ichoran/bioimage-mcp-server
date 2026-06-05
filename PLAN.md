@@ -408,11 +408,19 @@ writer pool (so compression actually uses the cores).
   stays up.  Success is returned only after every block future completed
   without error (a dead worker can't masquerade as a finished export).  An
   "already exists" open refusal never deletes (the path is the user's).
-- **Validated:** 427 unit tests (sharding-policy rules + cap; concurrent
+- **Channel metadata up front.** The image group's NGFF `omero` block now
+  carries each channel's `label` (name) + `color` (and a neutral type-range
+  `window`), parsed from the OME-XML `<Channel>` elements — so channel
+  names/colors are first-class for napari/vizarr, the analogue of how physical
+  units ride along in the multiscales scale, not just buried in the sidecar.
+  Omitted entirely when the source has no channel names/colors (never
+  fabricated).  `ZarrWriter.buildOmero`.
+- **Validated:** 429 unit tests (sharding-policy rules + cap; concurrent
   disjoint-*block* writes; forced-write-error fails op + deletes store;
-  `--parallelism` resolver + wiring); MCP smoke 10/10.  Live real-CZI:
-  parallelism scales ~1→2→4→8 = 3381→1717→1244→993 ms (byte-identical
-  output), sharding 63 plane-files → 37.
+  `--parallelism` resolver + wiring; omero present-with-names / absent-without);
+  MCP smoke 10/10.  Live real-CZI: parallelism scales ~1→2→4→8 =
+  3381→1717→1244→993 ms (byte-identical output), sharding 63 plane-files → 37,
+  and channel names (TagYFP/mRFP1.2/TL DIC) + colors surfaced in `omero`.
 
 
 ## Already done

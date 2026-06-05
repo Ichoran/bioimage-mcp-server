@@ -180,6 +180,46 @@ class ZarrWriterTest {
         assertTrue(arr.contains("\"clevel\":7"), arr);
     }
 
+    // ---- channel metadata (omero block) ----
+
+    @Test
+    void channelNamesAndColorsSurfacedInOmero(@TempDir Path dir) throws Exception {
+        String xml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">
+              <Image ID="Image:0" Name="t">
+                <Pixels ID="Pixels:0" DimensionOrder="XYCZT" Type="uint16"
+                  BigEndian="false" SizeX="%d" SizeY="%d" SizeZ="%d" SizeC="2" SizeT="%d">
+                  <Channel ID="Channel:0:0" Name="DAPI" Color="65535" SamplesPerPixel="1"/>
+                  <Channel ID="Channel:0:1" Name="GFP" Color="16711935" SamplesPerPixel="1"/>
+                </Pixels>
+              </Image>
+            </OME>
+            """.formatted(X, Y, Z, T);
+        Path store = dir.resolve("out.zarr");
+        try (var w = new ZarrWriter()) {
+            w.open(store, xml, "none");   // open creates the group metadata
+        }
+        String img = Files.readString(store.resolve("0").resolve("zarr.json"))
+                .replaceAll("\\s", "");
+        assertTrue(img.contains("\"omero\""), img);
+        assertTrue(img.contains("\"label\":\"DAPI\""), img);
+        assertTrue(img.contains("\"label\":\"GFP\""), img);
+        assertTrue(img.contains("\"color\":\"0000FF\""), img);   // blue (RGBA 65535)
+        assertTrue(img.contains("\"color\":\"00FF00\""), img);   // green
+    }
+
+    @Test
+    void noChannelMetadataOmitsOmero(@TempDir Path dir) throws Exception {
+        // The default test OME-XML has channels with no Name/Color → no omero.
+        Path store = dir.resolve("out.zarr");
+        try (var w = new ZarrWriter()) {
+            w.open(store, omeXml(false), "none");
+        }
+        String img = Files.readString(store.resolve("0").resolve("zarr.json"));
+        assertFalse(img.contains("omero"), img);
+    }
+
     // ---- sharding policy ----
 
     @Test

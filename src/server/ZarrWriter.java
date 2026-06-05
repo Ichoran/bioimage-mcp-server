@@ -161,9 +161,15 @@ public final class ZarrWriter implements ImageWriter {
         double scaleZ = doubleAttr(pixels, "PhysicalSizeZ", 1.0);
         String spaceUnit = ngffUnit(pixels.getAttribute("PhysicalSizeXUnit"));
 
-        // Image group with NGFF 0.5 multiscales metadata.
+        // Image group with NGFF 0.5 metadata: multiscales (axes + scale) plus,
+        // when the source has them, an `omero` block surfacing channel
+        // names/colors up front (what napari/vizarr read) rather than leaving
+        // them buried in the OME-XML sidecar.
+        var ome = multiscales(spaceUnit, scaleZ, scaleY, scaleX);
+        var omero = buildOmero(pixels, dataType);
+        if (omero != null) ome.put("omero", omero);
         var imageAttrs = new Attributes();
-        imageAttrs.set("ome", multiscales(spaceUnit, scaleZ, scaleY, scaleX));
+        imageAttrs.set("ome", ome);
         StoreHandle imageHandle = store.resolve(String.valueOf(s));
         dev.zarr.zarrjava.v3.Group.create(imageHandle, imageAttrs);
 
@@ -454,6 +460,83 @@ public final class ZarrWriter implements ImageWriter {
         a.put("type", type);
         if (unit != null) a.put("unit", unit);
         return a;
+    }
+
+    /**
+     * Build the NGFF {@code omero} block from the Pixels' {@code Channel}
+     * elements, so channel names (and colors) are first-class in the Zarr
+     * metadata rather than only in the OME-XML sidecar — the analogue of how we
+     * surface physical units in the multiscales scale.
+     *
+     * <p>Returns {@code null} when the source carries no real channel metadata
+     * (no names and no colors), so we never fabricate channel info that the
+     * file did not actually contain.
+     */
+    private static Map<String, Object> buildOmero(Element pixels, DataType dataType) {
+        List<Element> chans = OmeXmlSurgery.getChildElements(pixels, null, "Channel");
+        if (chans.isEmpty()) return null;
+
+        boolean anyRealMetadata = false;
+        long[] range = typeRange(dataType);   // null for float types
+        var channels = new ArrayList<Map<String, Object>>();
+        for (int i = 0; i < chans.size(); i++) {
+            Element ch = chans.get(i);
+            String name = ch.getAttribute("Name");
+            String colorAttr = ch.getAttribute("Color");
+            boolean hasName = name != null && !name.isBlank();
+            String hex = (colorAttr == null || colorAttr.isBlank())
+                    ? null : omeColorToHex(colorAttr);
+            if (hasName || hex != null) anyRealMetadata = true;
+
+            var cm = new LinkedHashMap<String, Object>();
+            cm.put("label", hasName ? name : "Channel " + i);
+            if (hex != null) cm.put("color", hex);
+            if (range != null) {
+                var w = new LinkedHashMap<String, Object>();
+                w.put("min", range[0]);
+                w.put("max", range[1]);
+                w.put("start", range[0]);
+                w.put("end", range[1]);
+                cm.put("window", w);   // full type range; neutral default contrast
+            }
+            cm.put("active", true);
+            channels.add(cm);
+        }
+        if (!anyRealMetadata) return null;
+
+        var rdefs = new LinkedHashMap<String, Object>();
+        rdefs.put("defaultT", 0);
+        rdefs.put("defaultZ", 0);
+        rdefs.put("model", channels.size() > 1 ? "color" : "greyscale");
+
+        var omero = new LinkedHashMap<String, Object>();
+        omero.put("channels", channels);
+        omero.put("rdefs", rdefs);
+        return omero;
+    }
+
+    /** Inclusive display range for an integer pixel type; null for float types. */
+    private static long[] typeRange(DataType dt) {
+        if (dt == DataType.UINT8)  return new long[]{0, 255};
+        if (dt == DataType.INT8)   return new long[]{-128, 127};
+        if (dt == DataType.UINT16) return new long[]{0, 65535};
+        if (dt == DataType.INT16)  return new long[]{-32768, 32767};
+        if (dt == DataType.UINT32) return new long[]{0, 4294967295L};
+        if (dt == DataType.INT32)  return new long[]{Integer.MIN_VALUE, Integer.MAX_VALUE};
+        return null;   // FLOAT32/FLOAT64 have no fixed display range
+    }
+
+    /** OME signed-int RGBA color → NGFF "RRGGBB" hex; null if unparsable. */
+    private static String omeColorToHex(String colorAttr) {
+        try {
+            long v = Long.parseLong(colorAttr.trim());
+            int r = (int) ((v >> 24) & 0xFF);
+            int g = (int) ((v >> 16) & 0xFF);
+            int b = (int) ((v >> 8) & 0xFF);
+            return String.format("%02X%02X%02X", r, g, b);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /** Map an OME length unit to an NGFF (UDUNITS) unit name, or null. */
