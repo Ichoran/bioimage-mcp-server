@@ -44,8 +44,8 @@ public interface ImageWriter extends AutoCloseable {
      * command: the writer chooses the closest value that divides each
      * series' volume with low overshoot (clamped to 1…planes-per-volume),
      * and may further coarsen it to honor a global file-count cap.  Query
-     * {@link #preferredBlockDepth(int)} after {@link #open} to learn the
-     * value actually chosen for each series.
+     * {@link #preferredBlockShape(int)} after {@link #open} to learn the
+     * shard shape actually chosen for each series.
      *
      * <p>Must be called before {@link #open} to take effect.  The default
      * implementation ignores it (plane-addressed writers such as OME-TIFF do
@@ -111,52 +111,62 @@ public interface ImageWriter extends AutoCloseable {
     }
 
     /**
-     * Hint: how many consecutive Z-planes the caller should batch into a
-     * single {@link #writeBlock} for this series.
+     * Hint: the shard's extent on the {@code (T, C, Z)} axes — how many
+     * timepoints, channels, and Z-planes one storage shard spans (Y and X are
+     * always the full plane).  The caller hands off one shard-aligned block at
+     * a time via {@link #writeShardBlock}, so distinct blocks never touch the
+     * same shard and may be written concurrently.
      *
-     * <p>For a plane-addressed writer (OME-TIFF) the answer is 1.  A writer
-     * that bundles planes into a larger storage unit (e.g. an OME-Zarr shard)
-     * returns that unit's Z-depth so the caller hands it whole units and the
-     * writer never has to read-modify-write a partially-filled unit.
+     * <p>For a plane-addressed writer (OME-TIFF) the answer is {@code {1,1,1}}.
+     * A writer that bundles planes into a larger storage unit (an OME-Zarr
+     * shard) returns that unit's shape — which, depending on the data's shape,
+     * may extend along Z, across channels ({@code [1,C,Z]}), or across time
+     * ({@code [T,1,1]}).
      *
      * @param series zero-based output series index
      */
-    default int preferredBlockDepth(int series) {
-        return 1;
+    default int[] preferredBlockShape(int series) {
+        return new int[]{1, 1, 1};
     }
 
     /**
-     * Write a contiguous block of {@code blockZ} Z-planes for one
-     * channel/timepoint of the current series.
+     * Write a shard-aligned block of {@code bt×bc×bz} planes in a single
+     * operation, at output-relative start {@code (tStart, cStart, zStart)}.
      *
-     * <p>{@code data} holds {@code blockZ} planes back to back in Z order,
-     * each {@code data.length / blockZ} bytes (same per-plane format as
-     * {@link #writePlane}).  The {@code c}/{@code zStart}/{@code t} indices are
-     * <b>output-relative</b>.  This is the unit a parallel exporter hands off:
-     * distinct blocks address disjoint storage, so they may be written
-     * concurrently.
+     * <p>{@code data} holds the planes in NGFF / OME-Zarr <b>TCZYX C-order</b>
+     * (time slowest, then channel, then Z; each plane row-major with X
+     * fastest), {@code data.length / (bt*bc*bz)} bytes per plane.  This is the
+     * unit a parallel exporter hands off: distinct shard-aligned blocks address
+     * disjoint storage, so they may be written concurrently.
      *
-     * <p>The default implementation splits the block into planes and calls
-     * {@link #writePlane(int, int, int, int, byte[])}, which is correct for
-     * plane-addressed writers.  A block-addressed writer (OME-Zarr) overrides
-     * this to store the whole block in one operation.
+     * <p>The default implementation splits the block into planes (in TCZYX
+     * order) and calls {@link #writePlane(int, int, int, int, byte[])}, which
+     * is correct for plane-addressed writers.  A shard-addressed writer
+     * (OME-Zarr) overrides this to store the whole block in one operation.
      *
-     * @param planeIndex flat index of the first plane (for plane-addressed
-     *                   writers; block-addressed writers may ignore it)
-     * @param c          output-relative channel index
-     * @param zStart     output-relative Z index of the first plane
-     * @param t          output-relative timepoint index
-     * @param blockZ     number of planes in {@code data}
-     * @param data       {@code blockZ} planes, Z-contiguous
+     * @param tStart output-relative timepoint of the first plane
+     * @param cStart output-relative channel of the first plane
+     * @param zStart output-relative Z of the first plane
+     * @param bt     number of timepoints in the block
+     * @param bc     number of channels in the block
+     * @param bz     number of Z-planes in the block
+     * @param data   {@code bt*bc*bz} planes in TCZYX C-order
      * @throws IOException if the data cannot be written
      */
-    default void writeBlock(int planeIndex, int c, int zStart, int t,
-                            int blockZ, byte[] data) throws IOException {
-        int planeLen = data.length / blockZ;
-        for (int k = 0; k < blockZ; k++) {
-            byte[] plane = new byte[planeLen];
-            System.arraycopy(data, k * planeLen, plane, 0, planeLen);
-            writePlane(planeIndex + k, c, zStart + k, t, plane);
+    default void writeShardBlock(int tStart, int cStart, int zStart,
+                                 int bt, int bc, int bz, byte[] data)
+            throws IOException {
+        int planeLen = data.length / (bt * bc * bz);
+        int idx = 0;
+        for (int ti = 0; ti < bt; ti++) {
+            for (int ci = 0; ci < bc; ci++) {
+                for (int zi = 0; zi < bz; zi++) {
+                    byte[] plane = new byte[planeLen];
+                    System.arraycopy(data, idx * planeLen, plane, 0, planeLen);
+                    writePlane(0, cStart + ci, zStart + zi, tStart + ti, plane);
+                    idx++;
+                }
+            }
         }
     }
 

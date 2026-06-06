@@ -67,7 +67,7 @@ public class SmokeTest {
                     var result = mapGet(initResponse, "result");
                     var info = mapGet(result, "serverInfo");
                     assertEqual("bioimage-mcp", info.get("name"));
-                    assertEqual("0.3.1", info.get("version"));
+                    assertEqual("0.3.2", info.get("version"));
                 });
 
         // --- Tools list ---

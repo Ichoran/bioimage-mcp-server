@@ -725,7 +725,7 @@ planes and composes the contiguous buffer itself.
 On connect the server sends a hello:
 
 ```json
-{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.3.1"}
+{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.3.2"}
 ```
 
 **Deposit** (one in flight per connection, sequential; `id` is client-chosen

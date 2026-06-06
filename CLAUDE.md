@@ -54,6 +54,13 @@ completed or priorities change.
   5.11.4); there is no `test/package.mill.yaml` anymore.
 - Test sources are in `test/src/server/` with the same package as main sources.
 - Run tests with `mill test`.
+- **Before publishing to Maven Central, `mill docJar` MUST pass.**  Sonatype
+  Central requires a Javadoc JAR, and `javadoc` fails hard on a broken
+  `{@link}`/`@see` reference (e.g. after renaming a method) — `mill test`
+  does NOT catch this.  So any release prep (version bump → publish) must run
+  `mill docJar` as a gate, alongside `mill test` and the MCP smoke test.
+  Pre-existing `@param`/"no comment" *warnings* are fine; only an `error:`
+  (exit non-zero) blocks the build.
 
 # MCP Java SDK
 

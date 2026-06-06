@@ -47,6 +47,36 @@ look up API details, pixel type constants, metadata accessors, etc.
   reported, suggestion reported + round-trips, sub-1 rejected, layout warnings
   surface in the result).  Docs: README "Shard sizing", MCP schema, this file.
 
+## Phase 18: Shape-aware shard planning (T/C/Z) — done
+
+Generalized OME-Zarr sharding from Z-only to a per-series shard *shape*
+`(shardT, shardC, shardZ)`, so the layout fits the file's shape (microscopy
+files vary wildly, and network FS wants the file unit matched to the data):
+
+- **`ZarrWriter.planSeries`** picks the shape.  Default is Z-sharding.  Two
+  shape-aware cases: (1) **pure time series** (`C==1 && Z==1`) shards across
+  **T** (same fit/byte logic on the T axis), so a long time-lapse isn't one
+  file per frame; (2) **multichannel** (`C>1`) bundles **all channels** into one
+  shard per timepoint (`[1,C,Z]` = the whole per-timepoint volume) when the
+  target planes-per-shard is closer in *log-space* to `C*Z` than to `Z`
+  (crossover `Z*sqrt(C)`, i.e. `target² > C*Z²`).  "Target" is the explicit
+  suggestion or the auto ~1 MB plane count.  `computeShardPlans` + the
+  file-count cap (`growShards` coarsens Z or T; channel-bundled shards are
+  already one file/timepoint) replace the Z-only `computeShardDepths` in
+  `open()` (the old function is kept for its unit tests).
+- **Write path generalized.**  `ImageWriter.writeBlock(planeIndex,c,zStart,t,
+  blockZ,…)` → `writeShardBlock(tStart,cStart,zStart,bt,bc,bz,data)` (TCZYX
+  C-order); `preferredBlockDepth` → `preferredBlockShape` returning `{t,c,z}`.
+  The export loop tiles the volume by the shard shape and hands off one
+  shard-aligned block per task (still disjoint → safe concurrent writes).
+  `shard_planes_per_series` now reports the **total** planes per shard
+  (`t*c*z`).  TIFF unaffected (uses `writePlane`).
+- **Validated:** full unit suite green (+`ZarrWriterTest`
+  planSeries/computeShardPlans ×6 incl. channel-bundle round-trip;
+  +`ExportToNgffToolTest` time-series and multichannel-bundle end-to-end ×2;
+  `ZarrConcurrencyTest` rewritten to write whole shards of the planned shape).
+  MCP smoke pending re-run.
+
 ## Phase 9: Transport separation (MCP ↔ microservice) — done
 
 - **`BioImageService`** — protocol-neutral core extracted from

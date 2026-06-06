@@ -39,7 +39,7 @@ import java.util.Map;
 public class BioImageMcpServer {
 
     static final String NAME = "bioimage-mcp";
-    static final String VERSION = "0.3.1";
+    static final String VERSION = "0.3.2";
 
     /**
      * Server-level instructions shown to the LLM when it discovers
@@ -631,18 +631,21 @@ public class BioImageMcpServer {
                         + "to codec 'none'."));
         props.put("suggested_planes_per_shard", Map.of(
                 "type", "integer",
-                "description", "Suggested number of Z-planes to bundle into each "
+                "description", "Suggested number of planes to bundle into each "
                         + "on-disk shard file (default: automatic ~1 MB sizing). "
                         + "Larger values mean fewer, bigger files — better when "
                         + "serving over a network filesystem where per-file "
                         + "latency dominates; smaller values give more files and "
                         + "finer-grained parallel (de)compression. This is only a "
-                        + "hint: the server picks the closest even fit (clamped to "
-                        + "1..planes-per-volume). An explicit suggestion overrides "
-                        + "the internal file-count cap and is honored even if it "
-                        + "yields very many files (a warning is returned when the "
-                        + "cap is exceeded). The actual value chosen is returned as "
-                        + "'shard_planes_per_series'."));
+                        + "hint: the server picks a shard shape that fits the data. "
+                        + "Normally it bundles Z-planes; if the hint is near the "
+                        + "whole per-timepoint volume (channels x Z) it bundles all "
+                        + "channels too; and for a pure time series (1 channel, 1 Z) "
+                        + "it bundles timepoints instead. An explicit suggestion "
+                        + "overrides the internal file-count cap and is honored even "
+                        + "if it yields very many files (a warning is returned when "
+                        + "the cap is exceeded). The actual planes-per-shard chosen "
+                        + "is returned as 'shard_planes_per_series'."));
         props.put("timeout_seconds", Map.of(
                 "type", "integer",
                 "description", "Wall-clock time limit in seconds (default: 1800)"));

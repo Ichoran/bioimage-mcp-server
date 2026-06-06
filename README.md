@@ -168,11 +168,20 @@ By default `export_to_ngff` sizes each shard file automatically (~1 MB of
 pixels), which gives good parallel (de)compression but can produce a great
 many files for large volumetric/time-series data — costly to serve over a
 network filesystem where each file operation is a round-trip.  Pass
-`suggested_planes_per_shard` to bundle more Z-planes into each file:
+`suggested_planes_per_shard` to bundle more planes into each file:
 
-- It is a **suggestion**, not an exact count.  The server picks the value
-  closest to your hint that divides each series' volume into shards with low
-  overshoot, clamped to `1…planes-per-volume`.
+- It is a **suggestion**, not an exact count.  The server picks a shard
+  *shape* that fits the data and lands near your hint, with low overshoot:
+  - normally it bundles **Z-planes** (one channel/timepoint per shard);
+  - if your hint is close (in log-space) to a whole per-timepoint volume
+    (`channels × Z`), it bundles **all channels** too — one shard per
+    timepoint;
+  - for a pure **time series** (1 channel, 1 Z) there is no Z to bundle, so
+    it shards across **time** instead.
+
+  This flexibility matters because microscopy files come in very different
+  shapes, and the right unit to amortize per-file latency on a network mount
+  depends on that shape.
 - An explicit suggestion **overrides** the server's internal file-count cap:
   it is honored even if it produces a great many files (you asked for it).
   When the cap is exceeded, a warning is included in the result so the

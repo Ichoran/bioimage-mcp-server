@@ -173,11 +173,12 @@ public final class ExportToNgffTool {
      * @param timepointsPerSeries timepoints per series in output
      * @param totalPlanesWritten  total planes across all series
      * @param codec               codec used
-     * @param shardPlanesPerSeries  the Z-planes-per-shard actually chosen for
-     *                    each exported series (in export order; min 1, max the
-     *                    series' planes-per-volume).  Always reported, whether
-     *                    sizing was automatic or driven by
-     *                    {@code suggested_planes_per_shard}, so the caller can
+     * @param shardPlanesPerSeries  the total planes per shard (the shard's
+     *                    T×C×Z extent) actually chosen for each exported series
+     *                    (in export order; min 1, max the per-timepoint volume
+     *                    C×Z, or the timepoint count for a pure time series).
+     *                    Always reported, whether sizing was automatic or driven
+     *                    by {@code suggested_planes_per_shard}, so the caller can
      *                    see exactly how the data was laid out on disk.
      * @param sourceFormat        source format name
      * @param omeXmlPresent       whether OME-XML was available from the reader
@@ -333,14 +334,16 @@ public final class ExportToNgffTool {
                     throw e;
                 }
 
-                // The writer has now chosen each series' shard depth: from the
+                // The writer has now chosen each series' shard shape: from the
                 // byte heuristic (which the file-count cap may coarsen) or from
                 // our suggestion (which overrides that cap, with a warning).
-                // Capture it so the caller always learns the actual on-disk
-                // layout — not merely what was requested.
+                // Capture the total planes per shard (T×C×Z extent) so the
+                // caller always learns the actual on-disk layout — not merely
+                // what was requested.
                 int[] shardPlanes = new int[seriesToExport.length];
                 for (int i = 0; i < seriesToExport.length; i++) {
-                    shardPlanes[i] = writer.preferredBlockDepth(i);
+                    int[] sh = writer.preferredBlockShape(i);
+                    shardPlanes[i] = sh[0] * sh[1] * sh[2];
                 }
                 // Surface any layout warnings (e.g. a suggestion that overrode
                 // the file-count cap) so the caller sees the cost of the choice.
@@ -354,37 +357,54 @@ public final class ExportToNgffTool {
                          seriesIdx < seriesToExport.length; seriesIdx++) {
                         int s = seriesToExport[seriesIdx];
                         writer.setSeries(seriesIdx);
-                        // Hand off whole shard blocks; distinct blocks address
-                        // disjoint shard files, so workers never collide.
-                        int blockZ = Math.max(1, writer.preferredBlockDepth(seriesIdx));
+                        // Hand off one shard-aligned block at a time; distinct
+                        // blocks address disjoint shard files, so workers never
+                        // collide.  The shard shape (T,C,Z extents) tells us how
+                        // to tile the volume into blocks.
+                        int[] sh = writer.preferredBlockShape(seriesIdx);
+                        int bT = Math.max(1, sh[0]);
+                        int bC = Math.max(1, sh[1]);
+                        int bZ = Math.max(1, sh[2]);
                         var futures = new ArrayList<java.util.concurrent.Future<?>>();
 
                         readLoop:
-                        for (int ti = 0; ti < tCount; ti++) {
-                            int t = tStart + ti;
-                            for (int ci = 0; ci < channels.length; ci++) {
-                                int ch = channels[ci];
-                                for (int zb = 0; zb < zCount; zb += blockZ) {
+                        for (int tb = 0; tb < tCount; tb += bT) {
+                            for (int cb = 0; cb < channels.length; cb += bC) {
+                                for (int zb = 0; zb < zCount; zb += bZ) {
                                     if (firstError.get() != null) break readLoop;
-                                    int bz = Math.min(blockZ, zCount - zb);
-                                    byte[] block = new byte[bz * planeLen];
-                                    for (int k = 0; k < bz; k++) {
-                                        byte[] p = reader.readPlane(
-                                                s, ch, zStart + zb + k, t);
-                                        if (p.length != planeLen) {
-                                            throw new java.io.IOException(
-                                                "plane size " + p.length
-                                                + " != expected " + planeLen);
+                                    int nt = Math.min(bT, tCount - tb);
+                                    int nc = Math.min(bC, channels.length - cb);
+                                    int nz = Math.min(bZ, zCount - zb);
+                                    // Assemble [nt,nc,nz,Y,X] in TCZYX C-order.
+                                    byte[] block = new byte[nt * nc * nz * planeLen];
+                                    int idx = 0;
+                                    for (int ti = 0; ti < nt; ti++) {
+                                        for (int ci = 0; ci < nc; ci++) {
+                                            int ch = channels[cb + ci];
+                                            for (int zi = 0; zi < nz; zi++) {
+                                                byte[] p = reader.readPlane(s, ch,
+                                                        zStart + zb + zi,
+                                                        tStart + tb + ti);
+                                                if (p.length != planeLen) {
+                                                    throw new java.io.IOException(
+                                                        "plane size " + p.length
+                                                        + " != expected " + planeLen);
+                                                }
+                                                System.arraycopy(p, 0, block,
+                                                        idx * planeLen, planeLen);
+                                                idx++;
+                                            }
                                         }
-                                        System.arraycopy(
-                                                p, 0, block, k * planeLen, planeLen);
                                     }
-                                    final int fc = ci, fzb = zb, ft = ti, fbz = bz;
+                                    final int ftb = tb, fcb = cb, fzb = zb,
+                                              fnt = nt, fnc = nc, fnz = nz;
                                     futures.add(pool.submit(() -> {
                                         if (firstError.get() != null) return;
                                         try {
-                                            writer.writeBlock(0, fc, fzb, ft, fbz, block);
-                                            planesWritten.addAndGet(fbz);
+                                            writer.writeShardBlock(
+                                                    ftb, fcb, fzb, fnt, fnc, fnz, block);
+                                            planesWritten.addAndGet(
+                                                    (long) fnt * fnc * fnz);
                                         } catch (Throwable th) {
                                             firstError.compareAndSet(null, th);
                                         }

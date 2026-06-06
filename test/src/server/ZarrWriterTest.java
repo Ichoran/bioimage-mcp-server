@@ -348,6 +348,82 @@ class ZarrWriterTest {
         assertEquals(29, s[0]);
     }
 
+    // ---- shape-aware shard planning (T/C/Z) ----
+
+    @Test
+    void planDefaultsToZSharding() {
+        // c>1 but a modest suggestion stays closer (log) to Z than to C*Z → Z.
+        ZarrWriter.ShardShape p = ZarrWriter.planSeries(1000, 3, 20, 5, 4);
+        assertEquals(1, p.t());
+        assertEquals(1, p.c());
+        assertEquals(ZarrWriter.fitShardPlanes(20, 4), p.z());
+    }
+
+    @Test
+    void planBundlesChannelsWhenTargetNearCZ() {
+        // c=3, z=10 (C*Z=30): a suggestion of 30 is closer to 30 than to 10 →
+        // one shard per timepoint spanning all channels and Z.
+        ZarrWriter.ShardShape p = ZarrWriter.planSeries(1000, 3, 10, 4, 30);
+        assertEquals(1, p.t());
+        assertEquals(3, p.c());
+        assertEquals(10, p.z());
+        assertEquals(30, p.planes());
+    }
+
+    @Test
+    void planShardsTimeForSinglePlaneVolume() {
+        // c==1 && z==1 (pure time series): shard across T with the same fit.
+        ZarrWriter.ShardShape p = ZarrWriter.planSeries(1000, 1, 1, 100, 10);
+        assertEquals(ZarrWriter.fitShardPlanes(100, 10), p.t());
+        assertEquals(1, p.c());
+        assertEquals(1, p.z());
+    }
+
+    @Test
+    void planAutoBundlesChannelsForTinyMultichannelVolume() {
+        // Auto: tiny planes, c=4,z=4 → the ~1 MB target is far above z → [1,4,4].
+        ZarrWriter.ShardShape[] ps = ZarrWriter.computeShardPlans(
+                new long[]{1024}, new int[]{4}, new int[]{4}, new int[]{2},
+                ZarrWriter.MAX_FILES, 0);
+        assertEquals(1, ps[0].t());
+        assertEquals(4, ps[0].c());
+        assertEquals(4, ps[0].z());
+    }
+
+    @Test
+    void planAutoShardsTimeForTimeSeries() {
+        // Auto pure time series: 10 KB planes, 1000 t → power-of-two T block.
+        ZarrWriter.ShardShape[] ps = ZarrWriter.computeShardPlans(
+                new long[]{10 * 1024}, new int[]{1}, new int[]{1}, new int[]{1000},
+                ZarrWriter.MAX_FILES, 0);
+        assertEquals(1, ps[0].c());
+        assertEquals(1, ps[0].z());
+        assertEquals(ZarrWriter.autoShardCount(10 * 1024, 1000), ps[0].t());
+        assertTrue(ps[0].t() > 1, "should bundle timepoints");
+    }
+
+    @Test
+    void channelBundledShardRoundTrips(@TempDir Path dir) throws Exception {
+        // Tiny C=2,Z=2 planes → planner picks [1,C,Z]; write whole-volume shards.
+        Path store = dir.resolve("cz.zarr");
+        try (var w = new ZarrWriter()) {
+            w.open(store, omeXml(false), "zstd");
+            assertArrayEquals(new int[]{1, C, Z}, w.preferredBlockShape(0));
+            w.setSeries(0);
+            for (int t = 0; t < T; t++) {
+                ByteBuffer buf = ByteBuffer.allocate(C * Z * Y * X * 2)
+                        .order(ByteOrder.LITTLE_ENDIAN);
+                for (int c = 0; c < C; c++)
+                    for (int z = 0; z < Z; z++)
+                        for (int y = 0; y < Y; y++)
+                            for (int x = 0; x < X; x++)
+                                buf.putShort((short) value(c, z, y, x));
+                w.writeShardBlock(t, 0, 0, 1, C, Z, buf.array());
+            }
+        }
+        assertRoundTrip(store);
+    }
+
     @Test
     void indexOnlyWriteUnsupported(@TempDir Path dir) throws Exception {
         try (var w = new ZarrWriter()) {

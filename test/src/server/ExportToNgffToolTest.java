@@ -192,9 +192,11 @@ class ExportToNgffToolTest {
                 d.open(p, x, c);
             }
             public void setSeries(int s) throws IOException { d.setSeries(s); }
-            public int preferredBlockDepth(int s) { return d.preferredBlockDepth(s); }
-            public void writeBlock(int i, int c, int z, int t, int bz, byte[] dat)
-                    throws IOException { d.writeBlock(i, c, z, t, bz, dat); }
+            public int[] preferredBlockShape(int s) { return d.preferredBlockShape(s); }
+            public void writeShardBlock(int ts, int cs, int zs, int bt, int bc,
+                    int bz, byte[] dat) throws IOException {
+                d.writeShardBlock(ts, cs, zs, bt, bc, bz, dat);
+            }
             public void writePlane(int i, byte[] dat) throws IOException {
                 d.writePlane(i, dat);
             }
@@ -222,6 +224,58 @@ class ExportToNgffToolTest {
                         Slice.all(), Slice.all(), Slice.all(),
                         Codec.NONE, null, 0, TIMEOUT, MAX_BYTES));
         assertTrue(ex.getMessage().contains("at least 1"), ex.getMessage());
+    }
+
+    @Test
+    void timeSeriesShardsAcrossTime(@TempDir Path dir) throws Exception {
+        // 1 channel, 1 Z, 8 timepoints with a suggestion of 4 → shard across T
+        // (no Z to bundle), 4 timepoints per shard; data round-trips.
+        Path store = dir.resolve("ts.zarr");
+        var request = ExportToNgffTool.Request.of(
+                "/input.tif", store.toString(), null,
+                Slice.all(), Slice.all(), Slice.all(),
+                Codec.NONE, null, 4, TIMEOUT, MAX_BYTES);
+        var result = ExportToNgffTool.execute(
+                request, PathValidator.allowAll(), reader(1, 1, 8),
+                ZarrWriter::new, POOL);
+        var r = ((ToolResult.Success<NgffResult>) result).value();
+        assertArrayEquals(new int[]{4}, r.shardPlanesPerSeries());
+
+        ucar.ma2.Array all = readBack(store, 8, 1, 1);
+        int i = 0;
+        for (int t = 0; t < 8; t++)
+            for (int y = 0; y < SY; y++)
+                for (int x = 0; x < SX; x++) {
+                    int got = all.getShort(i++) & 0xFFFF;
+                    assertEquals(rawValue(x, y, 0, 0, t), got);
+                }
+    }
+
+    @Test
+    void multichannelBundlesIntoWholeVolumeShard(@TempDir Path dir) throws Exception {
+        // 3 channels, 4 Z; suggestion ~ C*Z=12 → one shard per timepoint
+        // spanning all channels and Z (12 planes); data round-trips.
+        Path store = dir.resolve("cz.zarr");
+        var request = ExportToNgffTool.Request.of(
+                "/input.tif", store.toString(), null,
+                Slice.all(), Slice.all(), Slice.all(),
+                Codec.NONE, null, 12, TIMEOUT, MAX_BYTES);
+        var result = ExportToNgffTool.execute(
+                request, PathValidator.allowAll(), reader(3, 4, 2),
+                ZarrWriter::new, POOL);
+        var r = ((ToolResult.Success<NgffResult>) result).value();
+        assertArrayEquals(new int[]{12}, r.shardPlanesPerSeries());
+
+        ucar.ma2.Array all = readBack(store, 2, 3, 4);
+        int i = 0;
+        for (int t = 0; t < 2; t++)
+            for (int c = 0; c < 3; c++)
+                for (int z = 0; z < 4; z++)
+                    for (int y = 0; y < SY; y++)
+                        for (int x = 0; x < SX; x++) {
+                            int got = all.getShort(i++) & 0xFFFF;
+                            assertEquals(rawValue(x, y, c, z, t), got);
+                        }
     }
 
     @Test
@@ -369,12 +423,12 @@ class ExportToNgffToolTest {
             delegate.open(p, xml, c);   // creates the store on disk
         }
         public void setSeries(int s) throws IOException { delegate.setSeries(s); }
-        public int preferredBlockDepth(int s) { return delegate.preferredBlockDepth(s); }
+        public int[] preferredBlockShape(int s) { return delegate.preferredBlockShape(s); }
         public void writePlane(int i, byte[] d) throws IOException {
             throw new IOException("simulated write failure");
         }
-        public void writeBlock(int i, int c, int z, int t, int bz, byte[] d)
-                throws IOException {
+        public void writeShardBlock(int ts, int cs, int zs, int bt, int bc,
+                int bz, byte[] d) throws IOException {
             throw new IOException("simulated write failure");
         }
         public long getBytesWritten() { return delegate.getBytesWritten(); }
