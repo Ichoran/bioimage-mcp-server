@@ -32,11 +32,27 @@ page](https://www.jbang.dev/download/)!
 
 ### Example uses
 
+#### Choosing which version to run
+
+The `jbang https://…/blob/<ref>/runner/<file>` URLs below select a version by
+the `<ref>` in the path:
+
+- **`main`** — the current released line.
+- **`v0.4.0`** — adds the per-user **auth/identity** model: token-gated gRPC on
+  an ephemeral port, opt-in HTTP token, and user-only socket permissions (see
+  [Security and identity](#security-and-identity-who-can-connect)).
+
+Swap `main` for `v0.4.0` in any URL below to target that version.
+
 #### To use with Claude Code
 
 ```sh
+# released line:
 claude mcp add bioimage-mcp \
   -- jbang https://github.com/ichoran/bioimage-mcp-server/blob/main/runner/bioimage_mcp.java
+# this branch (v0.4.0):
+claude mcp add bioimage-mcp \
+  -- jbang https://github.com/ichoran/bioimage-mcp-server/blob/v0.4.0/runner/bioimage_mcp.java
 ```
 
 Then future invocations of claude will have access.
@@ -60,16 +76,24 @@ and future invocations will no longer have access.
 
 #### To use as a gRPC server (launching from GitHub)
 
-Run
+Run (the auth/identity behavior below is the `v0.4.0` line; for the released
+line use `blob/main/…` and see [Choosing which version to run](#choosing-which-version-to-run)):
 
 ```sh
-jbang https://github.com/ichoran/bioimage-mcp-server/blob/main/runner/bioimage_grpc.java \
+jbang https://github.com/ichoran/bioimage-mcp-server/blob/v0.4.0/runner/bioimage_grpc.java \
   --allow /network/core/confocal/JaneDoe
 ```
 
 in a terminal window; hit Ctrl-C to terminate.
 
-Connect via 127.0.0.1:8723; see src/proto/bioimage.proto for schema.
+By default the server binds loopback on an **ephemeral port** and requires a
+per-user **auth token**, writing both to a descriptor file
+(`$XDG_RUNTIME_DIR/bioimage-grpc.json`, mode 0600) that your client reads to
+connect — this keeps other local users out and lets several users run their own
+instances without colliding on a port.  Add `--port 8723` to pin a fixed port,
+or `--insecure` to drop the token.  Attach the token in the call's
+`authorization` metadata.  See `src/proto/bioimage.proto` for the schema and
+[API-grpc.md](API-grpc.md) for the connect flow.
 
 (Note that pixels are transferred across a filesystem endpoint, which may
 be a memory-mapped virtual file system if your system supports that; clients
@@ -145,6 +169,31 @@ jbang runner/bioimage_mcp.java --allow /data/microscopy --deny /tmp/secret
 
 CLI flags are merged with any paths hardcoded in the runner file.
 Deny rules always win.  See DESIGN.md §5 for details.
+
+### Security and identity (who can connect)
+
+Access control above governs *which files* a server may read.  The network
+transports also control *who may connect* — narrow by default, with flexibility
+as an explicit opt-in:
+
+- **gRPC** is **user-only** by default: it binds loopback on an **ephemeral
+  port** and requires a per-user **auth token**, publishing `{port, token}` to a
+  0600 descriptor file (`$XDG_RUNTIME_DIR/bioimage-grpc.json`) your own client
+  reads.  Other local users can't read the token; several users can run their
+  own instances without a port clash.  `--port` pins a fixed port, `--instance
+  <name>` runs several for one user, `--insecure` drops the token.
+- **HTTP** is **exposed** by default (all interfaces, no token — that's its
+  purpose).  Narrow it with `--bind 127.0.0.1` (one interface) and/or
+  `--require-token` (the token is printed to stderr at startup; `/health` stays
+  open).  A second local user picks another `--port`.
+- **Unix socket** is **user-only** by filesystem permissions: the socket lives
+  in a per-user 0700 directory and is itself 0600 — no token needed.
+- **MCP** runs over stdio as a child of your client, so it is already per-user
+  and per-client.
+
+On Linux/macOS these files are enforced with POSIX 0600/0700.  On Windows
+(no POSIX permissions) they live in your user-profile temp directory and rely on
+its inherited ACL; the token remains the real gate.  See DESIGN.md §5.4.
 
 ### Parallelism
 

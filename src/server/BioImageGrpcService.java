@@ -3,6 +3,14 @@ package lab.kerrr.mcpbio.bioimageserver;
 import com.google.protobuf.ByteString;
 
 import io.grpc.Server;
+// NOTE: interceptor/metadata/status types are the PLAIN core gRPC API
+// (io.grpc.*); only the netty *transport* below is shaded.  Do not import
+// io.grpc.netty.shaded.* for these — they would be the wrong, internal copies.
+import io.grpc.Metadata;
+import io.grpc.ServerCall;
+import io.grpc.ServerCallHandler;
+import io.grpc.ServerInterceptor;
+import io.grpc.Status;
 import io.grpc.netty.shaded.io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 
@@ -17,6 +25,7 @@ import org.apache.commons.cli.ParseException;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -43,28 +52,47 @@ import java.util.concurrent.atomic.AtomicReference;
  * Inspect/stats results are returned as JSON strings (JsonUtil is the single
  * source of truth for that shape); plane/thumbnail return PNG bytes inline.
  *
- * <p>Bound to the loopback address only (local-only by design); no TLS, no
- * auth.  Every path still passes the same deny &gt; allow &gt; client-roots
- * access check as on every other transport.
+ * <p>Bound to the loopback address only (local-only by design); no TLS.
+ * Loopback is machine-local but <em>not</em> user-only — any local user can
+ * reach a loopback port — so by default the server requires a per-user
+ * <b>auth token</b> ({@link LocalEndpoint}) and binds an <b>ephemeral port</b>,
+ * publishing {@code {port, token}} to a per-user descriptor file the same user's
+ * client reads to connect.  This keeps other users out and lets multiple users
+ * run their own instances without colliding on a fixed port.  {@code --insecure}
+ * drops the token; {@code --port} pins a fixed port.  Every path still passes the
+ * same deny &gt; allow &gt; client-roots access check as on every other transport.
  */
 public final class BioImageGrpcService {
 
     static final String NAME = "bioimage-grpc";
-    static final String VERSION = "0.3.2";
+    static final String VERSION = "0.4.0";
     static final int PROTOCOL = 1;
+    /** Conventional fixed port (for {@code --port}); not the default. */
     static final int DEFAULT_PORT = 8723;
+    /** Default: let the OS pick a free port (multi-user safe). */
+    static final int EPHEMERAL_PORT = 0;
+
+    /** gRPC metadata key carrying the auth token ({@code authorization}). */
+    private static final Metadata.Key<String> TOKEN_KEY =
+            Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER);
 
     private final BioImageService service;
-    private final int port;
+    private int port;
+    private boolean requireToken;
+    private String instance;
 
     /** Streams currently connected (a shutdown is honored only when sole). */
     private final AtomicInteger activeStreams = new AtomicInteger();
 
     private volatile Server grpcServer;
+    private volatile LocalEndpoint endpoint;
 
-    private BioImageGrpcService(BioImageService service, int port) {
+    private BioImageGrpcService(BioImageService service, int port,
+                               boolean requireToken, String instance) {
         this.service = service;
         this.port = port;
+        this.requireToken = requireToken;
+        this.instance = instance;
     }
 
     // ================================================================
@@ -78,7 +106,9 @@ public final class BioImageGrpcService {
     /** Thin builder delegating path rules to {@link BioImageService.Builder}. */
     public static class Builder {
         private final BioImageService.Builder service = BioImageService.builder();
-        private int port = DEFAULT_PORT;
+        private int port = EPHEMERAL_PORT;
+        private boolean requireToken = true;
+        private String instance;
 
         public Builder allow(String path) {
             service.allow(path);
@@ -90,14 +120,26 @@ public final class BioImageGrpcService {
             return this;
         }
 
-        /** Set the loopback TCP port to listen on (default {@value #DEFAULT_PORT}). */
+        /** Pin a fixed loopback TCP port (default: an ephemeral port). */
         public Builder port(int port) {
             this.port = port;
             return this;
         }
 
+        /** Whether to require the per-user auth token (default true). */
+        public Builder requireToken(boolean requireToken) {
+            this.requireToken = requireToken;
+            return this;
+        }
+
+        /** Optional instance label to disambiguate several same-user instances. */
+        public Builder instance(String instance) {
+            this.instance = instance;
+            return this;
+        }
+
         public BioImageGrpcService build() {
-            return new BioImageGrpcService(service.build(), port);
+            return new BioImageGrpcService(service.build(), port, requireToken, instance);
         }
     }
 
@@ -105,21 +147,26 @@ public final class BioImageGrpcService {
     // Lifecycle
     // ================================================================
 
-    /** Parse {@code --allow}/{@code --deny}/{@code --port}, bind, and serve. */
+    /**
+     * Parse {@code --allow}/{@code --deny}/{@code --port}/{@code --instance}/
+     * {@code --insecure}, bind, and serve.
+     */
     public void run(String[] args) {
-        int boundPort = port;
         try {
             var cli = new DefaultParser().parse(grpcOptions(), args);
             service.applyAllowDeny(
                     cli.getOptionValues("allow"), cli.getOptionValues("deny"));
             var portArg = cli.getOptionValue("port");
-            if (portArg != null) boundPort = Integer.parseInt(portArg);
+            if (portArg != null) this.port = Integer.parseInt(portArg);
+            var inst = cli.getOptionValue("instance");
+            if (inst != null) this.instance = inst;
+            if (cli.hasOption("insecure")) this.requireToken = false;
         } catch (ParseException | NumberFormatException e) {
             System.err.println("ERROR: " + e.getMessage());
             System.exit(1);
         }
         try {
-            start(boundPort);
+            start(port);
             grpcServer.awaitTermination();
         } catch (IOException e) {
             System.err.println("ERROR: failed to start gRPC server: " + e.getMessage());
@@ -134,7 +181,20 @@ public final class BioImageGrpcService {
         options.addOption(Option.builder()
                 .longOpt("port")
                 .hasArg()
-                .desc("Loopback TCP port to listen on (default " + DEFAULT_PORT + ")")
+                .desc("Pin a fixed loopback TCP port (e.g. " + DEFAULT_PORT
+                        + "); default is an ephemeral port published to the "
+                        + "per-user descriptor file")
+                .build());
+        options.addOption(Option.builder()
+                .longOpt("instance")
+                .hasArg()
+                .desc("Label to run several instances for one user "
+                        + "(distinct descriptor file)")
+                .build());
+        options.addOption(Option.builder()
+                .longOpt("insecure")
+                .desc("Disable the per-user auth token (any local user may "
+                        + "connect; NOT recommended)")
                 .build());
         return options;
     }
@@ -142,20 +202,65 @@ public final class BioImageGrpcService {
     /** Bind to loopback and start the server (non-blocking). */
     public void start(int boundPort) throws IOException {
         var address = new InetSocketAddress(InetAddress.getLoopbackAddress(), boundPort);
-        grpcServer = NettyServerBuilder.forAddress(address)
-                .addService(new SessionService())
-                .build()
-                .start();
+        var builder = NettyServerBuilder.forAddress(address)
+                .addService(new SessionService());
+        if (requireToken) {
+            // Create the token BEFORE binding; publish the descriptor after, when
+            // the actual (possibly ephemeral) port is known.
+            endpoint = LocalEndpoint.create(NAME, instance, true);
+            builder.intercept(new TokenInterceptor(endpoint));
+        }
+        grpcServer = builder.build().start();
+        int actual = grpcServer.getPort();
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             var s = grpcServer;
             if (s != null) s.shutdownNow();
+            var e = endpoint;
+            if (e != null) e.cleanup();
         }));
-        System.err.println(NAME + " " + VERSION
-                + " listening on grpc://127.0.0.1:" + grpcServer.getPort());
+
+        if (requireToken) {
+            Path descriptor = endpoint.publish(actual);
+            System.err.println(NAME + " " + VERSION
+                    + " listening on grpc://127.0.0.1:" + actual
+                    + "  (descriptor: " + descriptor + ")");
+        } else {
+            System.err.println("WARN: gRPC auth token disabled (--insecure); "
+                    + "any local user can connect");
+            System.err.println(NAME + " " + VERSION
+                    + " listening on grpc://127.0.0.1:" + actual);
+        }
+    }
+
+    /**
+     * Rejects any call whose {@code authorization} metadata does not match the
+     * per-user token.  Implemented with the plain {@code io.grpc.*} API (the
+     * netty transport is shaded; these interceptor types are not).
+     */
+    private static final class TokenInterceptor implements ServerInterceptor {
+        private final LocalEndpoint endpoint;
+
+        TokenInterceptor(LocalEndpoint endpoint) {
+            this.endpoint = endpoint;
+        }
+
+        @Override
+        public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
+                ServerCall<ReqT, RespT> call, Metadata headers,
+                ServerCallHandler<ReqT, RespT> next) {
+            if (!endpoint.verify(headers.get(TOKEN_KEY))) {
+                call.close(Status.UNAUTHENTICATED
+                        .withDescription("missing or invalid auth token"), new Metadata());
+                return new ServerCall.Listener<>() { };  // no-op
+            }
+            return next.startCall(call, headers);
+        }
     }
 
     public static void main(String[] args) {
-        new BioImageGrpcService(BioImageService.builder().build(), DEFAULT_PORT)
+        new BioImageGrpcService(
+                BioImageService.builder().build(), EPHEMERAL_PORT, true, null)
                 .run(args);
     }
 
@@ -163,7 +268,12 @@ public final class BioImageGrpcService {
 
     /** Build over a pre-configured service (used by tests to inject a fake reader). */
     static BioImageGrpcService create(BioImageService service, int port) {
-        return new BioImageGrpcService(service, port);
+        return new BioImageGrpcService(service, port, true, null);
+    }
+
+    /** Build with the token explicitly enabled/disabled (test support). */
+    static BioImageGrpcService create(BioImageService service, int port, boolean requireToken) {
+        return new BioImageGrpcService(service, port, requireToken, null);
     }
 
     /** The actual bound port (useful when started on port 0). */
@@ -171,10 +281,24 @@ public final class BioImageGrpcService {
         return grpcServer.getPort();
     }
 
-    /** Stop the server immediately (test teardown). */
+    /** The per-user auth token, or null when running insecure (test support). */
+    String authTokenForTest() {
+        var e = endpoint;
+        return e == null ? null : e.token();
+    }
+
+    /** Stop the server immediately and remove its descriptor (test teardown). */
     void stop() {
         var s = grpcServer;
         if (s != null) s.shutdownNow();
+        var e = endpoint;
+        if (e != null) e.cleanup();
+    }
+
+    /** The published descriptor file path, or null when insecure (test support). */
+    Path descriptorFileForTest() {
+        var e = endpoint;
+        return e == null ? null : e.descriptorFile();
     }
 
     /**

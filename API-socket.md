@@ -38,9 +38,16 @@ jbang runner/bioimage_socket.java --allow /dev/shm --allow /data/microscopy
 jbang runner/bioimage_socket.java --socket /run/user/1000/bio.sock --allow /dev/shm
 ```
 
-Options: `--socket <path>` (default: `$XDG_RUNTIME_DIR/bioimage-deposit.sock`,
-or the temp dir if `XDG_RUNTIME_DIR` is unset), and the shared `--allow
+Options: `--socket <path>` (default: `$XDG_RUNTIME_DIR/bioimage-deposit.sock`;
+without `XDG_RUNTIME_DIR`, a per-user `bioimage-<user>/bioimage-deposit.sock`
+under the temp dir — never bare in a shared `/tmp`), and the shared `--allow
 <path>` / `--deny <path>` (repeatable).
+
+**Connection identity (user-only).** The socket needs no token: it is user-only
+by **filesystem** permissions.  It lives in a per-user 0700 directory and the
+socket file itself is set 0600 (on POSIX; on Windows it inherits the per-user
+profile-directory ACL), so another local user cannot connect, and each user gets
+a distinct default path — instances never collide.
 
 **You must `--allow` (or otherwise permit) both** the directory of the
 source images **and** the directory holding the shared-memory region
@@ -82,7 +89,7 @@ socket file on exit.
 On connect, the server immediately sends a hello:
 
 ```json
-{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.3.2"}
+{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.4.0"}
 ```
 
 `protocol` is the wire-protocol version (currently `1`).  Read this line

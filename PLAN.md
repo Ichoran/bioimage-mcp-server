@@ -7,6 +7,49 @@ identified that deserves its own step.  Re-order when priorities change.
 `../../java/bioformats` (i.e. `~/Code/java/bioformats`).  Use it to
 look up API details, pixel type constants, metadata accessors, etc.
 
+## Phase 19: Transport security, identity & multi-user — done
+
+Tightened transport-level identity so the default posture is narrow and several
+users can run their own instances on one machine — *keep others out* **and**
+*let the right user in* without port collisions.  Full rationale in DESIGN §5.4
+(new), §9.2, §11.2.
+
+- **`LocalEndpoint`** (new) — the two-sided helper: generates a ~256-bit
+  `SecureRandom` token (base64url), resolves a **per-user** runtime directory
+  (`$XDG_RUNTIME_DIR`; else a `bioimage-<user>/` subdir of the temp dir, never
+  bare `/tmp`), and `publish(port)`-es a `{port, token}` **descriptor** file so a
+  same-user client learns *where* + *the secret* from one 0600 read.
+  Constant-time `verify` (`MessageDigest.isEqual`, strips `Bearer `).  POSIX
+  perms are **branched, not assumed**: 0700 dir / 0600 file via
+  `PosixFilePermissions.asFileAttribute` where `supportedFileAttributeViews()`
+  has `posix` (Linux/macOS), else rely on the profile-dir ACL (Windows).
+  Anti-squat: a pre-existing per-user dir is rejected unless owned by us and not
+  group/world-accessible.
+- **gRPC** — **token required by default**, **ephemeral port** by default;
+  `start()` publishes the descriptor after bind.  A `ServerInterceptor` (plain
+  `io.grpc.*`; only the netty transport is shaded) rejects a missing/wrong
+  `authorization` token with `UNAUTHENTICATED`.  Token rides in metadata — **no
+  `.proto` change**.  New flags: `--port` (pin), `--instance <name>` (several
+  per user), `--insecure` (drop token).  `stop()` cleans the descriptor.
+- **HTTP** — stays **exposed** (all interfaces, no token by default — its point).
+  New opt-ins: `--bind <addr>` (one interface) and `--require-token` (a
+  `com.sun.net.httpserver.Filter` on the six POST contexts; `Authorization:
+  Bearer`/`X-Auth-Token`; 401 in the standard error shape; `/health` stays
+  open).  Token printed to stderr (remote clients can't read the local
+  descriptor) plus a descriptor for local clients.  Startup log prints the real
+  bind host.
+- **Socket** — user-only by **filesystem**: per-user 0700 dir (created/verified
+  before bind — closes the TOCTOU window) + 0600 socket; default path moved off
+  bare `/tmp` into the per-user dir.  No token.
+- **MCP** — unchanged (stdio; per-client subprocess, inherently per-user).
+- **Validated:** new `LocalEndpointTest` (×7), `SocketPermsTest` (×1),
+  `HttpTokenTest` (×1); `BioImageGrpcServiceTest` now attaches the token and adds
+  rejection + descriptor-discovery tests.  Full `mill test` green; `mill docJar`
+  gate; MCP smoke.  Cross-platform: Linux verified; macOS POSIX path; Windows
+  file-perm path best-effort/untested (token + ephemeral-port logic are
+  platform-independent).  Docs: DESIGN §5.4/§9.2/§11.2, README (security +
+  gRPC connect), runner comments, API-grpc/http/socket.md, this file.
+
 ## Phase 17: Tunable shard sizing + always-reported shard depth — done
 
 - **`suggested_planes_per_shard`** — new optional `export_to_ngff` parameter

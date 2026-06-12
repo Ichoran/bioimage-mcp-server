@@ -9,9 +9,11 @@ For operation arguments, the error model, access control, and pixel-data
 conventions, see **[service-endpoints.md](service-endpoints.md)**.  For the
 design rationale, see **DESIGN.md §10** (sessions) and **§11** (gRPC).
 
-**Local-only.** The server binds the loopback interface (`127.0.0.1`) with no
-TLS and no auth.  It is intended for a co-located client, exactly like the
-socket transport.
+**Local-only, user-only.** The server binds the loopback interface (`127.0.0.1`)
+with no TLS.  Loopback is machine-local but not user-only, so by default the
+server requires a per-user **auth token** and binds an **ephemeral port** — see
+§2a for how a client discovers and authenticates to its own instance.  Intended
+for a co-located client, exactly like the socket transport.
 
 ## 1. The two planes
 
@@ -30,10 +32,11 @@ jbang runner/bioimage_grpc.java --allow /dev/shm --allow /data/microscopy
 jbang runner/bioimage_grpc.java --port 9000 --allow /dev/shm
 ```
 
-Options: `--port <n>` (default `8723`) and the shared, repeatable
-`--allow <path>` / `--deny <path>`.  As with the socket service you must
-permit both the source-image directory and the shared-memory directory (e.g.
-`--allow /dev/shm`).
+Options: `--port <n>` (pin a fixed port; default is an **ephemeral** port),
+`--instance <name>` (run several instances for one user), `--insecure` (drop the
+auth token), and the shared, repeatable `--allow <path>` / `--deny <path>`.  As
+with the socket service you must permit both the source-image directory and the
+shared-memory directory (e.g. `--allow /dev/shm`).
 
 Local development against the fat jar (the published `//DEPS` artifact won't
 contain this class yet):
@@ -44,7 +47,40 @@ java -cp "out/assembly.dest/out.jar" \
     lab.kerrr.mcpbio.bioimageserver.BioImageGrpcService --allow /dev/shm --allow /data
 ```
 
-The server logs `listening on grpc://127.0.0.1:<port>` to stderr.
+The server logs `listening on grpc://127.0.0.1:<port>` and the descriptor path
+to stderr.
+
+## 2a. Connecting: discovery + auth token
+
+Unless `--insecure` is given, a client connects in two steps:
+
+1. **Discover the endpoint.** Read the per-user descriptor file the server
+   published — `$XDG_RUNTIME_DIR/bioimage-grpc.json` (or, with `--instance foo`,
+   `bioimage-grpc-foo.json`; on non-XDG platforms, `bioimage-<user>/…` under the
+   temp dir).  It is a 0600 JSON object:
+
+   ```json
+   { "port": 41877, "token": "Yt9c…urlsafe…" }
+   ```
+
+   Only the same OS user can read it, which is exactly the access check.
+
+2. **Authenticate every call.** Send the token in the `authorization` request
+   metadata (a bare token or `Bearer <token>`).  A missing or wrong token is
+   rejected with gRPC status `UNAUTHENTICATED`; the token is **not** part of
+   `bioimage.proto` (it rides in metadata), so the schema is unchanged.
+
+   ```java
+   var md = new Metadata();
+   md.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER), token);
+   var channel = ManagedChannelBuilder.forAddress("127.0.0.1", port)
+           .usePlaintext()
+           .intercept(MetadataUtils.newAttachHeadersInterceptor(md))
+           .build();
+   ```
+
+Two users running their own servers get two descriptor files in two per-user
+directories — no port clash, no shared secret.
 
 ## 3. The service
 

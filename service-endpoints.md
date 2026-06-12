@@ -275,6 +275,23 @@ a request to a path outside the allow list is rejected with
 already checked at `open` time, and the (still-stable) allow/deny policy is
 re-applied on every handle operation.
 
+### 5.1 Transport identity (who may connect)
+
+Path access answers *which files*; a separate, transport-level layer answers
+*who may connect* — narrow by default (DESIGN.md §5.4):
+
+| Transport | Default identity | Discovery | Failure |
+|-----------|------------------|-----------|---------|
+| gRPC | per-user token; loopback; **ephemeral** port | `bioimage-grpc.json` descriptor (`{port, token}`, 0600, per-user) | `UNAUTHENTICATED` |
+| HTTP | **exposed** (all interfaces, no token) | fixed port 8722 | `--require-token` → **401** `access_denied` |
+| socket | user-only by **filesystem** perms (0600 socket, 0700 dir) | per-user socket path | OS connect refused |
+| MCP | stdio child process — per-user/per-client | n/a | n/a |
+
+The gRPC token rides in `authorization` **metadata**, not the `.proto`.  HTTP
+opt-ins are `--bind <addr>` and `--require-token` (`Authorization: Bearer` /
+`X-Auth-Token`; `/health` stays open).  gRPC opt-outs/labels: `--port`,
+`--instance`, `--insecure`.
+
 ## 6. Pixel-data conventions
 
 These apply wherever raw pixel bytes are exposed (notably `deposit`):

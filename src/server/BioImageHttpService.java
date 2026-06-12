@@ -1,5 +1,7 @@
 package lab.kerrr.mcpbio.bioimageserver;
 
+import com.sun.net.httpserver.Filter;
+import com.sun.net.httpserver.HttpContext;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -11,8 +13,11 @@ import org.apache.commons.cli.ParseException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -59,16 +64,26 @@ import java.util.concurrent.Executors;
 public final class BioImageHttpService {
 
     static final String NAME = "bioimage-http";
-    static final String VERSION = "0.3.2";
+    static final String VERSION = "0.4.0";
 
     static final int DEFAULT_PORT = 8722;
 
     private final BioImageService service;
-    private final int port;
+    private int port;
+    /** Interface to bind; null means all interfaces (the default — HTTP is the exposed transport). */
+    private String bindAddr;
+    /** Whether to require the auth token (opt-in; off by default). */
+    private boolean requireToken;
 
-    private BioImageHttpService(BioImageService service, int port) {
+    private volatile HttpServer httpServer;
+    private volatile LocalEndpoint endpoint;
+
+    private BioImageHttpService(BioImageService service, int port,
+                               String bindAddr, boolean requireToken) {
         this.service = service;
         this.port = port;
+        this.bindAddr = bindAddr;
+        this.requireToken = requireToken;
     }
 
     // ================================================================
@@ -83,6 +98,8 @@ public final class BioImageHttpService {
     public static class Builder {
         private final BioImageService.Builder service = BioImageService.builder();
         private int port = DEFAULT_PORT;
+        private String bindAddr;
+        private boolean requireToken;
 
         /** Add a path that the server is explicitly allowed to access. */
         public Builder allow(String path) {
@@ -102,8 +119,20 @@ public final class BioImageHttpService {
             return this;
         }
 
+        /** Restrict to a specific interface (default: all interfaces). */
+        public Builder bind(String bindAddr) {
+            this.bindAddr = bindAddr;
+            return this;
+        }
+
+        /** Require the per-user auth token on the operation endpoints (default false). */
+        public Builder requireToken(boolean requireToken) {
+            this.requireToken = requireToken;
+            return this;
+        }
+
         public BioImageHttpService build() {
-            return new BioImageHttpService(service.build(), port);
+            return new BioImageHttpService(service.build(), port, bindAddr, requireToken);
         }
     }
 
@@ -122,8 +151,11 @@ public final class BioImageHttpService {
             service.applyAllowDeny(
                     cli.getOptionValues("allow"), cli.getOptionValues("deny"));
             var portArg = cli.getOptionValue("port");
-            int boundPort = portArg != null ? Integer.parseInt(portArg) : port;
-            start(boundPort);
+            if (portArg != null) this.port = Integer.parseInt(portArg);
+            var bindArg = cli.getOptionValue("bind");
+            if (bindArg != null) this.bindAddr = bindArg;
+            if (cli.hasOption("require-token")) this.requireToken = true;
+            start(port);
         } catch (ParseException | NumberFormatException e) {
             System.err.println("ERROR: " + e.getMessage());
             System.exit(1);
@@ -139,38 +171,138 @@ public final class BioImageHttpService {
         options.addOption(Option.builder()
                 .longOpt("port")
                 .hasArg()
-                .desc("TCP port to listen on (default " + DEFAULT_PORT + ")")
+                .desc("TCP port to listen on (default " + DEFAULT_PORT
+                        + "); a second local user can pick another port")
+                .build());
+        options.addOption(Option.builder()
+                .longOpt("bind")
+                .hasArg()
+                .desc("Interface address to bind, e.g. 127.0.0.1 "
+                        + "(default: all interfaces)")
+                .build());
+        options.addOption(Option.builder()
+                .longOpt("require-token")
+                .desc("Require the auth token on operation endpoints "
+                        + "(printed at startup; /health stays open)")
                 .build());
         return options;
     }
 
     /** Bind and start the server on the given port. */
     public void start(int boundPort) throws IOException {
-        var server = HttpServer.create(new InetSocketAddress(boundPort), 0);
+        InetSocketAddress address = (bindAddr == null)
+                ? new InetSocketAddress(boundPort)                       // all interfaces
+                : new InetSocketAddress(InetAddress.getByName(bindAddr), boundPort);
+        var server = HttpServer.create(address, 0);
+        this.httpServer = server;
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 
-        server.createContext("/inspect_image",
-                ex -> handleJson(ex, service::inspectImage, JsonUtil::toMap));
-        server.createContext("/get_ome_metadata",
-                ex -> handleJson(ex, service::getOmeMetadata, JsonUtil::toMap));
-        server.createContext("/get_intensity_stats",
-                ex -> handleJson(ex, service::getIntensityStats, JsonUtil::toMap));
-        server.createContext("/export_to_tiff",
-                ex -> handleJson(ex, service::exportToTiff, JsonUtil::toMap));
-        server.createContext("/get_plane", this::handleGetPlane);
-        server.createContext("/get_thumbnail", this::handleGetThumbnail);
+        // Operation endpoints (the token filter, if any, guards exactly these).
+        var opContexts = new ArrayList<HttpContext>();
+        opContexts.add(server.createContext("/inspect_image",
+                ex -> handleJson(ex, service::inspectImage, JsonUtil::toMap)));
+        opContexts.add(server.createContext("/get_ome_metadata",
+                ex -> handleJson(ex, service::getOmeMetadata, JsonUtil::toMap)));
+        opContexts.add(server.createContext("/get_intensity_stats",
+                ex -> handleJson(ex, service::getIntensityStats, JsonUtil::toMap)));
+        opContexts.add(server.createContext("/export_to_tiff",
+                ex -> handleJson(ex, service::exportToTiff, JsonUtil::toMap)));
+        opContexts.add(server.createContext("/get_plane", this::handleGetPlane));
+        opContexts.add(server.createContext("/get_thumbnail", this::handleGetThumbnail));
+        // Health/description stays UNAUTHENTICATED so liveness checks work.
         server.createContext("/", this::handleRoot);
 
-        Runtime.getRuntime().addShutdownHook(
-                new Thread(() -> server.stop(0)));
+        if (requireToken) {
+            // HTTP may be reached remotely, where a local descriptor file is
+            // unreadable, so print the token to stderr too; also publish the
+            // descriptor for same-user local clients.
+            endpoint = LocalEndpoint.create(NAME, null, true);
+            var filter = new TokenFilter(endpoint);
+            for (var ctx : opContexts) ctx.getFilters().add(filter);
+        }
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            server.stop(0);
+            var e = endpoint;
+            if (e != null) e.cleanup();
+        }));
         server.start();
-        System.err.println(NAME + " " + VERSION
-                + " listening on http://127.0.0.1:" + boundPort);
+
+        String host = (bindAddr == null) ? "0.0.0.0 (all interfaces)" : bindAddr;
+        if (requireToken) {
+            Path descriptor = endpoint.publish(server.getAddress().getPort());
+            System.err.println(NAME + " " + VERSION + " listening on http://" + host
+                    + ":" + server.getAddress().getPort());
+            System.err.println(NAME + ": auth token: " + endpoint.token());
+            System.err.println(NAME + ": descriptor: " + descriptor);
+        } else {
+            System.err.println(NAME + " " + VERSION + " listening on http://" + host
+                    + ":" + server.getAddress().getPort());
+        }
+    }
+
+    // ---- test support ----
+
+    /** Build over a pre-configured service (used by tests to inject a fake reader). */
+    static BioImageHttpService create(BioImageService service, int port,
+                                      String bindAddr, boolean requireToken) {
+        return new BioImageHttpService(service, port, bindAddr, requireToken);
+    }
+
+    /** The actual bound port (useful when started on port 0). */
+    int boundPort() {
+        return httpServer.getAddress().getPort();
+    }
+
+    /** The per-user auth token, or null when not required (test support). */
+    String authTokenForTest() {
+        var e = endpoint;
+        return e == null ? null : e.token();
+    }
+
+    /** Stop the server and remove its descriptor (test teardown). */
+    void stop() {
+        var s = httpServer;
+        if (s != null) s.stop(0);
+        var e = endpoint;
+        if (e != null) e.cleanup();
     }
 
     public static void main(String[] args) {
-        new BioImageHttpService(BioImageService.builder().build(), DEFAULT_PORT)
+        new BioImageHttpService(BioImageService.builder().build(), DEFAULT_PORT, null, false)
                 .run(args);
+    }
+
+    /**
+     * Rejects operation requests whose {@code Authorization}/{@code X-Auth-Token}
+     * header does not match the per-user token, with a 401 in the same JSON shape
+     * as every other error.  Attached only to the operation contexts — never to
+     * {@code /health} — so liveness checks need no credential.
+     */
+    private static final class TokenFilter extends Filter {
+        private final LocalEndpoint endpoint;
+
+        TokenFilter(LocalEndpoint endpoint) {
+            this.endpoint = endpoint;
+        }
+
+        @Override
+        public String description() {
+            return "require-token auth";
+        }
+
+        @Override
+        public void doFilter(HttpExchange ex, Chain chain) throws IOException {
+            String presented = ex.getRequestHeaders().getFirst("Authorization");
+            if (presented == null) {
+                presented = ex.getRequestHeaders().getFirst("X-Auth-Token");
+            }
+            if (endpoint.verify(presented)) {
+                chain.doFilter(ex);
+            } else {
+                writeError(ex, 401, "access_denied", "missing or invalid auth token");
+            }
+        }
     }
 
     // ================================================================

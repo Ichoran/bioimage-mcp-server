@@ -18,9 +18,11 @@ jbang runner/bioimage_http.java --allow /data/microscopy
 jbang runner/bioimage_http.java --port 9000 --allow /data/microscopy
 ```
 
-Options: `--port <n>` (default **8722**), and the shared `--allow
-<path>` / `--deny <path>` (repeatable).  You can also hardcode allow/deny
-and the port in the runner file.
+Options: `--port <n>` (default **8722**; a second local user picks another),
+`--bind <addr>` (restrict to one interface, e.g. `127.0.0.1`; default is all
+interfaces), `--require-token` (demand an auth token on the operation
+endpoints), and the shared `--allow <path>` / `--deny <path>` (repeatable).
+You can also hardcode these in the runner file.
 
 For local development against a build that contains not-yet-published
 classes, run the class directly from the fat jar (avoids the published
@@ -32,15 +34,33 @@ java -cp out/assembly.dest/out.jar \
     lab.kerrr.mcpbio.bioimageserver.BioImageHttpService --port 8722 --allow /data
 ```
 
-The server binds `127.0.0.1:<port>` and logs `listening on
-http://127.0.0.1:<port>` to stderr.
+By default the server binds **all interfaces** (`0.0.0.0:<port>`) — HTTP is the
+exposed transport — and logs the bound host/port to stderr.  `--bind 127.0.0.1`
+restricts it to loopback.
+
+## 1a. Authentication (opt-in)
+
+HTTP is **open by default** (no token — that is its point).  Pass
+`--require-token` to demand a shared token on the operation endpoints:
+
+- The server prints the token to stderr at startup (`bioimage-http: auth token:
+  …`) and also writes it, with the port, to a per-user 0600 descriptor file
+  (`$XDG_RUNTIME_DIR/bioimage-http.json`) for same-user local clients.
+- Send it on each operation request as `Authorization: Bearer <token>` (or
+  `X-Auth-Token: <token>`).  A missing/wrong token returns **401** with the
+  standard `{"error_kind":"access_denied", …}` body.
+- `GET /` and `GET /health` stay **unauthenticated** so liveness checks work.
+
+For real network exposure, put the server behind your own TLS-terminating
+reverse proxy; the token is a coarse gate, not a substitute for transport
+security.
 
 ## 2. Request shape
 
 Every operation is a `POST` to `/<operation>` whose body is the
 operation's argument object as JSON (the snake_case parameters from
-service-endpoints.md §3).  No authentication; intended for a local,
-trusted client.
+service-endpoints.md §3).  Authentication is off unless `--require-token` is
+given (§1a).
 
 ```
 POST /<operation>  HTTP/1.1

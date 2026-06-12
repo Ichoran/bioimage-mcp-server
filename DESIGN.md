@@ -526,6 +526,53 @@ Command-line arguments or environment variables are alternative mechanisms, but
 the runner file has the advantage of being self-documenting and
 version-controllable per machine.
 
+### 5.4 Identity, Authentication & Multi-User
+
+Path access control (§5.1–5.3) answers *which files* a server may touch.  It
+does **not** answer *who may talk to the server* — a separate, transport-level
+concern that matters as soon as more than one user shares a machine.  The
+guiding principle mirrors the rest of the project: **narrow by default;
+flexibility is an explicit ask.**
+
+Security here is two-sided, and one helper (`LocalEndpoint`) covers both:
+
+- **Keep other users out.**  The network transports use a ~256-bit random
+  **token** (gRPC always; HTTP opt-in) checked in constant time.  Token,
+  descriptor, and socket files live in a **per-user** directory with owner-only
+  permissions, so only the same OS user can read the secret or reach the socket.
+- **Let the right user in — without colliding.**  After binding, a server
+  publishes a small **descriptor file** — `{"port", "token"}` — into that
+  per-user directory.  The same user's client reads *one* file to learn *where*
+  to connect *and* the secret to present.  Because each user has their own
+  runtime directory, two users running their own instances never collide and
+  never see each other's descriptor.  gRPC additionally binds an **ephemeral
+  port** by default, so a fixed-port `EADDRINUSE` clash is impossible; several
+  same-user instances are disambiguated with `--instance <name>`.
+
+**Per-transport posture:**
+
+| Transport | Default identity | Discovery | Opt-outs / opt-ins |
+|-----------|------------------|-----------|--------------------|
+| **gRPC**  | token required; loopback; ephemeral port | per-user descriptor `bioimage-grpc.json` | `--port` pins; `--instance` names; `--insecure` drops the token |
+| **HTTP**  | **exposed** (all interfaces, no token) — that *is* its point | fixed port 8722 | `--bind <addr>` narrows the interface; `--require-token` demands a token (printed to stderr; `/health` stays open); `--port` for a second user |
+| **Socket**| user-only by **filesystem** perms (0600 socket in a 0700 per-user dir); no token | per-user socket path | `--socket` sets an explicit path |
+| **MCP**   | stdio: each client spawns its own subprocess — inherently per-user/per-client | n/a | n/a |
+
+**Where the per-user directory is (per-user by construction):** `$XDG_RUNTIME_DIR`
+(`/run/user/<uid>`, 0700) on Linux; `$TMPDIR` (`/var/folders/…/T/`, per-user
+0700) on macOS; `%LOCALAPPDATA%\Temp` (profile, ACL'd) on Windows.  On a non-XDG
+platform a `bioimage-<user>/` subdirectory is used so secrets are never dropped
+bare into a shared `/tmp`; a pre-existing such directory is rejected (POSIX)
+unless it is owned by us and not group/world-accessible (anti-squat).
+
+**Cross-platform note.** File-mode enforcement is real (0600/0700) on Linux and
+macOS.  On Windows (NTFS, no POSIX view) we rely on the user-profile directory's
+inherited ACL rather than setting an explicit DACL — local administrators can
+read the files there, as they can anywhere.  The **token**, not the file mode,
+is the actual network gate, so functionality is identical across platforms;
+only the depth of the file-layer defense varies.  (The Windows file-perm path is
+best-effort and currently untested.)
+
 
 ## 6. Extensibility Plan
 
@@ -695,6 +742,16 @@ lifecycle management is entirely the client's.
   pass the same deny > allow > client-roots check as every other operation,
   so a crafted `target.path` cannot induce the server to write outside
   permitted directories.  Clients typically `--allow /dev/shm`.
+- **Connection identity (user-only).** The socket needs no token: it is
+  user-only by **filesystem** identity.  The control socket is bound inside a
+  per-user 0700 directory (`$XDG_RUNTIME_DIR`, or a `bioimage-<user>/` subdir of
+  the temp dir on non-XDG platforms — never bare in a shared `/tmp`) and the
+  socket file itself is set 0600, so another local user cannot connect.  The
+  0700 directory is the primary guarantee (created/verified before the bind, so
+  there is no reachable window) and the 0600 socket is defense-in-depth; both are
+  no-ops on non-POSIX filesystems, where the per-user profile-directory ACL
+  applies instead (see §5.4).  Each user thus gets a distinct socket path —
+  instances never collide.
 
 ### 9.3 Buffer layout
 
@@ -725,7 +782,7 @@ planes and composes the contiguous buffer itself.
 On connect the server sends a hello:
 
 ```json
-{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.3.2"}
+{"type":"ready","protocol":1,"service":"bioimage-socket","version":"0.4.0"}
 ```
 
 **Deposit** (one in flight per connection, sequential; `id` is client-chosen
@@ -907,10 +964,17 @@ closes every handle the stream opened — closing the kept-open readers.  A
 stream, mirroring the socket adapter.
 
 The server binds the **loopback interface only** (`127.0.0.1`), via
-`grpc-netty-shaded` — cross-platform, no native epoll dependency, no TLS, no
-auth.  This is a local data-plane transport by design; a remote/secured gRPC
-endpoint (TLS, UDS via native transport, authn) is a future extension that
-does not change the tool logic.
+`grpc-netty-shaded` — cross-platform, no native epoll dependency, no TLS.
+Loopback is machine-local but **not user-only**, so by default the server
+requires a per-user **auth token** and binds an **ephemeral port**, publishing
+`{port, token}` to a per-user descriptor file the same user's client reads (see
+§5.4).  The token rides in the call's `authorization` **metadata** — it is *not*
+part of `bioimage.proto`, so this adds no schema change and an old client simply
+fails the auth check rather than failing to compile.  A `ServerInterceptor`
+(plain `io.grpc.*`; only the netty *transport* is shaded) rejects a missing or
+wrong token with `UNAUTHENTICATED`.  `--insecure` drops the token; `--port` pins
+a fixed port.  A remote/secured gRPC endpoint (TLS, UDS via native transport,
+stronger authn) is a future extension that does not change the tool logic.
 
 ### 11.3 Build: Maven-fetched protoc toolchain
 

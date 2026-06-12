@@ -16,6 +16,12 @@
 // The client must --allow (or root) both the source images and the
 // shared-memory target directory (e.g. --allow /dev/shm).
 //
+// SECURITY: the socket is user-only by filesystem identity (no token).  By
+// default it lives in $XDG_RUNTIME_DIR (per-user, 0700); without XDG it goes
+// in a per-user bioimage-<user>/ subdirectory of the temp dir (never bare in
+// a shared /tmp), and the socket file itself is set 0600.  Each user thus has
+// their own socket path — instances never collide.  See DESIGN.md §9.
+//
 // For development against a local build, run the class straight from
 // the fat jar (the published //DEPS artifact won't contain this class
 // yet, and would shadow the local copy on jbang's classpath):
@@ -28,7 +34,7 @@
 
 //JAVA 21
 //REPOS mavencentral,ome=https://artifacts.openmicroscopy.org/artifactory/maven/,unidata=https://artifacts.unidata.ucar.edu/all/
-//DEPS com.github.ichoran:bioimage_mcp_server:0.3.2
+//DEPS com.github.ichoran:bioimage_mcp_server:0.4.0
 //DEPS com.fasterxml.jackson.core:jackson-annotations:2.20
 
 import lab.kerrr.mcpbio.bioimageserver.BioImageSocketService;

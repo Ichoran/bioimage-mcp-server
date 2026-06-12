@@ -2,6 +2,9 @@ package lab.kerrr.mcpbio.bioimageserver;
 
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.Metadata;
+import io.grpc.Status;
+import io.grpc.stub.MetadataUtils;
 import io.grpc.stub.StreamObserver;
 
 import lab.kerrr.mcpbio.bioimageserver.grpc.*;
@@ -13,6 +16,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -42,6 +46,18 @@ class BioImageGrpcServiceTest {
                 .build();
     }
 
+    /** A loopback channel carrying the server's per-user auth token. */
+    private static ManagedChannel authedChannel(BioImageGrpcService grpc) {
+        Metadata md = new Metadata();
+        md.put(Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER),
+                grpc.authTokenForTest());
+        return ManagedChannelBuilder
+                .forAddress("127.0.0.1", grpc.boundPort())
+                .usePlaintext()
+                .intercept(MetadataUtils.newAttachHeadersInterceptor(md))
+                .build();
+    }
+
     /** Collects server messages off the bidi stream. */
     private static final class Collector implements StreamObserver<ServerMsg> {
         final BlockingQueue<ServerMsg> q = new LinkedBlockingQueue<>();
@@ -62,8 +78,7 @@ class BioImageGrpcServiceTest {
         var service = serviceFor(dir);
         var grpc = BioImageGrpcService.create(service, 0);
         grpc.start(0);
-        ManagedChannel channel = ManagedChannelBuilder
-                .forAddress("127.0.0.1", grpc.boundPort()).usePlaintext().build();
+        ManagedChannel channel = authedChannel(grpc);
         try {
             Path src = dir.resolve("src.fake");
             Files.createFile(src);
@@ -167,8 +182,7 @@ class BioImageGrpcServiceTest {
         var service = serviceFor(dir);
         var grpc = BioImageGrpcService.create(service, 0);
         grpc.start(0);
-        ManagedChannel channel = ManagedChannelBuilder
-                .forAddress("127.0.0.1", grpc.boundPort()).usePlaintext().build();
+        ManagedChannel channel = authedChannel(grpc);
         try {
             Path src = dir.resolve("src.fake");
             Files.createFile(src);
@@ -194,6 +208,55 @@ class BioImageGrpcServiceTest {
                     "dropping the stream must close the kept-open reader");
         } finally {
             grpc.stop();
+        }
+    }
+
+    @Test
+    void missingOrWrongTokenIsRejected(@TempDir Path dir) throws Exception {
+        var service = serviceFor(dir);
+        var grpc = BioImageGrpcService.create(service, 0);   // token required (default)
+        grpc.start(0);
+        // A plaintext channel with NO auth metadata.
+        ManagedChannel channel = ManagedChannelBuilder
+                .forAddress("127.0.0.1", grpc.boundPort()).usePlaintext().build();
+        try {
+            var stub = BioImageGrpc.newStub(channel);
+            var collector = new Collector();
+            stub.session(collector);
+
+            // The interceptor closes the call before the handler runs: no READY,
+            // an onError carrying UNAUTHENTICATED instead.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (collector.error == null && System.nanoTime() < deadline) Thread.sleep(20);
+            assertNotNull(collector.error, "a token-less call must be rejected");
+            assertEquals(Status.Code.UNAUTHENTICATED,
+                    Status.fromThrowable(collector.error).getCode());
+            assertTrue(collector.q.isEmpty(), "no server messages should reach an unauth'd client");
+        } finally {
+            channel.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+            grpc.stop();
+        }
+    }
+
+    @Test
+    void descriptorPublishesBoundPortAndToken(@TempDir Path dir) throws Exception {
+        var service = serviceFor(dir);
+        var grpc = BioImageGrpcService.create(service, 0);
+        grpc.start(0);
+        try {
+            Path descriptor = grpc.descriptorFileForTest();
+            assertNotNull(descriptor);
+            assertTrue(Files.exists(descriptor), "descriptor file must be published");
+
+            Map<String, Object> desc = JsonUtil.parseObject(Files.readString(descriptor));
+            assertEquals(grpc.boundPort(), ((Number) desc.get("port")).intValue(),
+                    "descriptor port must match the bound (ephemeral) port");
+            assertEquals(grpc.authTokenForTest(), desc.get("token"),
+                    "descriptor token must match the server token");
+        } finally {
+            grpc.stop();
+            assertFalse(Files.exists(grpc.descriptorFileForTest()),
+                    "stop() must remove the descriptor");
         }
     }
 }

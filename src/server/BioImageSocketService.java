@@ -69,7 +69,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class BioImageSocketService {
 
     static final String NAME = "bioimage-socket";
-    static final String VERSION = "0.3.2";
+    static final String VERSION = "0.4.0";
     static final int PROTOCOL = 1;
 
     private final BioImageService service;
@@ -86,13 +86,15 @@ public final class BioImageSocketService {
         this.socketPath = socketPath;
     }
 
-    /** Default socket path: under XDG_RUNTIME_DIR if set, else the temp dir. */
+    /**
+     * Default socket path: under {@code $XDG_RUNTIME_DIR} (per-user, 0700) when
+     * set, else inside a per-user {@code bioimage-<user>/} subdirectory of the
+     * temp dir — never bare in a shared {@code /tmp}.  See
+     * {@link LocalEndpoint#resolveRuntimeDir()} (the same per-user directory the
+     * gRPC/HTTP descriptor files use), so two users never collide on one path.
+     */
     static Path defaultSocketPath() {
-        String runtime = System.getenv("XDG_RUNTIME_DIR");
-        String dir = (runtime != null && !runtime.isBlank())
-                ? runtime
-                : System.getProperty("java.io.tmpdir", "/tmp");
-        return Path.of(dir, "bioimage-deposit.sock");
+        return LocalEndpoint.resolveRuntimeDir().resolve("bioimage-deposit.sock");
     }
 
     // ================================================================
@@ -170,6 +172,23 @@ public final class BioImageSocketService {
 
     /** Bind the socket and run the accept loop (blocks the calling thread). */
     public void serve(Path bindPath) throws IOException {
+        // The control plane is user-only by *filesystem* identity (no token):
+        // the socket lives in a per-user 0700 directory and the socket file
+        // itself is set 0600, so another local user cannot connect.  For the
+        // *default* per-user location we create the directory 0700 and refuse a
+        // foreign-owned or group/world-accessible one (anti-squat) BEFORE
+        // binding.  An explicit --socket path is the user's deliberate choice:
+        // we honor it, only ensuring the parent exists (no policing — putting a
+        // socket in a shared dir is then on them).
+        Path parent = bindPath.getParent();
+        if (parent != null) {
+            if (parent.equals(LocalEndpoint.resolveRuntimeDir())) {
+                LocalEndpoint.ensurePrivateDir(parent);
+            } else {
+                Files.createDirectories(parent);
+            }
+        }
+
         // Remove a stale socket file from a previous run.  The server owns
         // this file (it is not user data), so removing it is safe.
         Files.deleteIfExists(bindPath);
@@ -177,6 +196,10 @@ public final class BioImageSocketService {
         var address = UnixDomainSocketAddress.of(bindPath);
         var server = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
         server.bind(address);
+        // Tighten the socket to owner-only (0600) immediately after bind.  The
+        // 0700 parent is the primary guarantee; this is defense-in-depth and a
+        // no-op on non-POSIX filesystems (Windows relies on the directory ACL).
+        LocalEndpoint.restrictToOwner(bindPath);
         this.serverChannel = server;
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

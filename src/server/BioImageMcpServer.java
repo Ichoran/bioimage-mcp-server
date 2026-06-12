@@ -39,7 +39,7 @@ import java.util.Map;
 public class BioImageMcpServer {
 
     static final String NAME = "bioimage-mcp";
-    static final String VERSION = "0.3.2";
+    static final String VERSION = "0.4.0";
 
     /**
      * Server-level instructions shown to the LLM when it discovers
